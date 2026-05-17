@@ -1,0 +1,22 @@
+{
+  "name": "open-chat-session-dashboard",
+  "private": true,
+  "version": "0.2.0",
+  "type": "module",
+  "scripts": {
+    "build": "vite build",
+    "dev": "vite build --watch"
+  },
+  "dependencies": {
+    "@assistant-ui/react": "^0.14.5",
+    "@assistant-ui/react-markdown": "^0.14.0",
+    "react-dom": "^19.2.0",
+    "remark-gfm": "^4.0.1"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.0",
+    "typescript": "~5.9.3",
+    "vite": "^7.3.1"
+  }
+}

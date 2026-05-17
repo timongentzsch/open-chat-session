@@ -1,0 +1,13 @@
+name: open-chat-session
+kind: platform
+version: 0.1.0
+description: >
+  Native HTTP/SSE client gateway with a hash-chained event log per session.
+  Runs alongside hermes's stock api_server (does not replace it). Auth via
+  Tailscale identity or bearer token fallback.
+author: Timon Gentzsch
+requires_env:
+  - name: OPEN_CHAT_SESSION_BIND
+    description: "Bind address, e.g. 0.0.0.0:8765 (host-network) or 127.0.0.1:8765 (loopback only)"
+    prompt: "Bind address (host:port)"
+    password: false

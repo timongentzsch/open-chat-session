@@ -1,0 +1,10 @@
+{
+  "name": "open-chat-session",
+  "label": "Chat Session",
+  "description": "Multi-session SSE chat backed by the open-chat-session gateway.",
+  "icon": "MessageSquare",
+  "version": "0.3.0",
+  "tab": { "path": "/chat-session", "position": "after:chat" },
+  "entry": "dist/index.js?v=20260517c",
+  "api": "plugin_api.py"
+}
