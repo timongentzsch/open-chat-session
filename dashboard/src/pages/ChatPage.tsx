@@ -17,6 +17,7 @@ import {
 import { pendingApprovals, recentlyResolved } from "@/runtime/session-store";
 import { getSelectedSession, setSelectedSession } from "@/runtime/resume";
 import type { ApprovalDecision, HealthResponse, SessionInfo } from "@/types";
+import { HEALTH_POLL_MS } from "@/constants";
 
 export function ChatPage() {
   const client = useGatewayClient();
@@ -26,20 +27,30 @@ export function ChatPage() {
 
   const [selected, setSelected] = useState<string | null>(() => getSelectedSession());
   const [health, setHealth] = useState<HealthResponse | null>(null);
+  const [healthError, setHealthError] = useState<string | null>(null);
   const [resumeFallback, setResumeFallback] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
-    client
-      .health()
-      .then((h) => {
-        if (!cancelled) setHealth(h);
-      })
-      .catch(() => {
-        if (!cancelled) setHealth(null);
-      });
+    async function check() {
+      try {
+        const h = await client.health();
+        if (!cancelled) {
+          setHealth(h);
+          setHealthError(null);
+        }
+      } catch (exc) {
+        if (!cancelled) {
+          setHealth(null);
+          setHealthError(exc instanceof Error ? exc.message : String(exc));
+        }
+      }
+    }
+    void check();
+    const id = window.setInterval(check, HEALTH_POLL_MS);
     return () => {
       cancelled = true;
+      window.clearInterval(id);
     };
   }, [client]);
 
@@ -142,7 +153,7 @@ export function ChatPage() {
             </span>
           )}
         </div>
-        <ConnectionPill conn={conn} platform={health?.platform} />
+        <ConnectionPill conn={conn} platform={health?.platform} healthError={healthError} />
       </header>
 
       <div className={cn("flex min-h-0 flex-1")}>
@@ -188,16 +199,18 @@ export function ChatPage() {
                     ? "Loading history…"
                     : "No messages yet. Send something below."
                 }
-              />
-              <Composer
-                placeholder={
-                  !selected
-                    ? "Pick a session"
-                    : activeSession?.archived
-                    ? "Archived session — read-only"
-                    : conn.kind !== "connected"
-                      ? "Waiting for connection…"
-                      : "Message…"
+                footer={
+                  <Composer
+                    placeholder={
+                      !selected
+                        ? "Pick a session"
+                        : activeSession?.archived
+                        ? "Archived session — read-only"
+                        : conn.kind !== "connected"
+                          ? "Waiting for connection…"
+                          : "Message…"
+                    }
+                  />
                 }
               />
             </AssistantRuntimeProvider>

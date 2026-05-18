@@ -1,6 +1,21 @@
-import { React, useState, cn, timeAgo } from "@/sdk";
+import { React, useState, cn } from "@/sdk";
 import type { SessionInfo } from "@/types";
 import { actionButton, fieldBase, iconButton, panelTitle } from "@/ui";
+import { RELATIVE_TIME_BUCKETS } from "@/constants";
+
+// Host SDK's `timeAgo` returns "just now" for every timestamp regardless of
+// age (verified empirically). Local fallback until that's fixed upstream.
+function formatRelative(ms: number): string {
+  const diff = Date.now() - ms;
+  if (diff < RELATIVE_TIME_BUCKETS.MINUTE_MS) return "just now";
+  const m = Math.floor(diff / RELATIVE_TIME_BUCKETS.MINUTE_MS);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(diff / RELATIVE_TIME_BUCKETS.HOUR_MS);
+  if (h < 24) return `${h}h ago`;
+  const d = Math.floor(diff / RELATIVE_TIME_BUCKETS.DAY_MS);
+  if (d < 14) return `${d}d ago`;
+  return new Date(ms).toISOString().slice(0, 10);
+}
 
 export interface SessionSidebarProps {
   sessions: SessionInfo[];
@@ -25,8 +40,9 @@ export function SessionSidebar({
   return (
     <aside
       className={cn(
-        "flex w-64 shrink-0 flex-col gap-2 border-r border-midground/20 bg-foreground/[0.02] p-3",
+        "flex w-64 shrink-0 flex-col gap-2 border-r border-midground/20 p-3",
       )}
+      style={{ background: "color-mix(in srgb, var(--foreground-base, #fff) 2%, transparent)" }}
     >
       <div className={cn("flex h-9 items-center justify-between")}>
         <h2 className={cn(panelTitle)}>Sessions</h2>
@@ -61,7 +77,7 @@ export function SessionSidebar({
           />
           <button
             type="submit"
-            className={cn(actionButton, "h-8 border-foreground/40 px-2 text-foreground hover:bg-foreground/10")}
+            className={cn(actionButton, "h-8 border-foreground/40 px-2 text-foreground hover:bg-foreground/20")}
           >
             ok
           </button>
@@ -69,7 +85,7 @@ export function SessionSidebar({
       )}
 
       {error && (
-        <div className={cn("rounded border border-rose-500/40 px-2 py-1 text-xs text-rose-400")}>
+        <div className={cn("rounded border border-rose-500/40 px-2 py-1 text-xs text-destructive")}>
           {error}
         </div>
       )}
@@ -89,13 +105,13 @@ export function SessionSidebar({
                 className={cn(
                   "w-full rounded px-2 py-1.5 text-left text-xs",
                   active
-                    ? "bg-foreground/10 text-foreground"
-                    : "text-midground/80 hover:bg-foreground/5",
+                    ? "bg-foreground/20 text-foreground"
+                    : "text-midground/80 hover:bg-foreground/2",
                 )}
               >
                 <div className={cn("truncate font-medium")}>{s.name || "Untitled"}</div>
                 <div className={cn("text-[10px] text-midground/50")}>
-                  {(s.event_count ?? s.tip_seq ?? 0)} ev · {s.created_at ? timeAgo(s.created_at) : ""}
+                  {(s.event_count ?? s.tip_seq ?? 0)} ev · {s.created_at ? formatRelative(s.created_at) : ""}
                 </div>
               </button>
             </li>

@@ -3,6 +3,9 @@ open-chat-session adapter — native HTTP/SSE client surface for Hermes Agent.
 
 Serves /sessions/* REST + SSE on the configured bind address. Runs alongside
 Hermes's stock api_server; does NOT expose /v1/* (that surface is unmodified).
+
+Peer identity: Tailscale ``whois`` is the canonical source; bearer-token auth
+(``API_SERVER_KEY``) is the fallback for localhost/proxy callers.
 """
 
 import asyncio
@@ -44,6 +47,7 @@ DEFAULT_BIND = "0.0.0.0:8765"
 DEFAULT_DATA_DIR = "~/.hermes/data/open-chat-session"
 DEFAULT_MAX_ATTACHMENT_SIZE = 100 * 1024 * 1024  # 100 MB
 APPROVAL_TIMEOUT_S = 300
+APPROVAL_CHOICES = ("once", "session", "always", "deny")
 SSE_HEADERS = {
     "Content-Type": "text/event-stream",
     "Cache-Control": "no-cache",
@@ -228,6 +232,10 @@ class AttachmentInfo:
 class HashChainedLog:
     """Append-only, hash-chained event log per session_id, backed by SQLite."""
 
+    # Reads (``tip``, ``lookup_hash``, ``range_after``, ``last_n``,
+    # ``known_sessions``) are synchronous and serialized by the asyncio event
+    # loop; only ``append`` needs the async lock for ordering across awaits.
+
     def __init__(self, db_path: Path):
         self._db_path = db_path
         self._db: Optional[sqlite3.Connection] = None
@@ -281,6 +289,7 @@ class HashChainedLog:
                 prev_hash = ""
                 seq = 1
             ts = _now_ms()
+            data_bytes = _canonical_bytes(data)
             event_for_hash = {
                 "seq": seq,
                 "prev_hash": prev_hash,
@@ -296,7 +305,7 @@ class HashChainedLog:
                 "INSERT INTO events (session_id, seq, prev_hash, hash, "
                 "stream_id, kind, data, ts) VALUES (?,?,?,?,?,?,?,?)",
                 (session_id, seq, prev_hash, h, stream_id, kind,
-                 _canonical_bytes(data), ts),
+                 data_bytes, ts),
             )
             self._db.commit()
 
@@ -617,7 +626,7 @@ class AttachmentStore:
 
 def _sse_event(event_payload: dict) -> bytes:
     """SSE wire bytes for a logged hash-chain event (includes id: <hash>)."""
-    body = {k: v for k, v in event_payload.items() if k != "kind"}
+    body = _wire_event(event_payload)
     return (
         f"id: {event_payload['hash']}\n"
         f"event: {event_payload['kind']}\n"
@@ -628,6 +637,12 @@ def _sse_event(event_payload: dict) -> bytes:
 def _sse_simple(event: str, data: dict) -> bytes:
     """SSE wire bytes for an ad-hoc event that doesn't go into the log."""
     return f"event: {event}\ndata: {json.dumps(data)}\n\n".encode()
+
+
+def _wire_event(event_payload: dict) -> dict:
+    event = dict(event_payload)
+    event["payload"] = event.pop("data", {})
+    return event
 
 
 async def _prepare_sse(request: web.Request) -> web.StreamResponse:
@@ -658,8 +673,8 @@ class OpenChatSessionAdapter(BasePlatformAdapter):
             extra = {}
             try:
                 config.extra = extra
-            except Exception:
-                pass
+            except AttributeError as exc:
+                logger.warning("could not set config.extra: %s", exc)
         extra["group_sessions_per_user"] = False
         extra["thread_sessions_per_user"] = False
 
@@ -784,7 +799,7 @@ class OpenChatSessionAdapter(BasePlatformAdapter):
         return SendResult(success=True, message_id=message_id)
 
     async def edit_message(self, chat_id, message_id, content, *,
-                           finalize) -> SendResult:
+                           finalize: bool = False) -> SendResult:
         session_id = chat_id
         key = (session_id, message_id)
         stream_id = (
@@ -842,10 +857,14 @@ class OpenChatSessionAdapter(BasePlatformAdapter):
             caption=caption, reply_to=reply_to,
         )
 
-    async def send_video(self, chat_id, video_url, caption=None,
-                         reply_to=None, metadata=None, **_) -> SendResult:
+    async def send_video(self, chat_id, video_url=None, caption=None,
+                         reply_to=None, metadata=None,
+                         video_path=None, **_) -> SendResult:
+        ref = video_url or video_path
+        if not ref:
+            return SendResult(success=False, error="missing video path")
         return await self._emit_media(
-            chat_id, "gateway.video", [video_url],
+            chat_id, "gateway.video", [str(ref)],
             caption=caption, reply_to=reply_to,
         )
 
@@ -856,14 +875,18 @@ class OpenChatSessionAdapter(BasePlatformAdapter):
             caption=caption, reply_to=reply_to,
         )
 
-    async def send_document(self, chat_id, document_url, caption=None,
+    async def send_document(self, chat_id, document_url=None, caption=None,
                             file_name=None, filename=None,
-                            reply_to=None, metadata=None, **_) -> SendResult:
-        # `file_name` is the Base kwarg; `filename` is what we used historically.
+                            reply_to=None, metadata=None,
+                            file_path=None, **_) -> SendResult:
+        ref = document_url or file_path
+        if not ref:
+            return SendResult(success=False, error="missing document path")
+        name = file_name or filename or os.path.basename(str(ref))
         return await self._emit_media(
-            chat_id, "gateway.document", [document_url],
+            chat_id, "gateway.document", [str(ref)],
             caption=caption, reply_to=reply_to,
-            filename=file_name or filename,
+            filename=name,
         )
 
     async def send_voice(self, chat_id, audio_path, caption=None,
@@ -949,7 +972,7 @@ class OpenChatSessionAdapter(BasePlatformAdapter):
                 "prompt": description,
                 "command": command,
                 "args": md.get("args"),
-                "choices": ["once", "session", "always", "deny"],
+                "choices": list(APPROVAL_CHOICES),
                 "expires_at": _now_ms() + APPROVAL_TIMEOUT_S * 1000,
                 "session_key": session_key,
             },
@@ -1005,7 +1028,7 @@ class OpenChatSessionAdapter(BasePlatformAdapter):
 
     # --- auth ---
 
-    async def _whois(
+    async def _tailscale_whois(
         self, peer_ip: Optional[str],
     ) -> Tuple[Optional[str], List[str]]:
         if not peer_ip:
@@ -1025,7 +1048,9 @@ class OpenChatSessionAdapter(BasePlatformAdapter):
             user = (data.get("UserProfile") or {}).get("LoginName")
             tags = (data.get("Node") or {}).get("Tags") or []
             return user, list(tags)
-        except Exception:
+        except (asyncio.TimeoutError, json.JSONDecodeError,
+                FileNotFoundError, OSError) as exc:
+            logger.debug("tailscale whois failed: %s", exc)
             return None, []
 
     async def _authorize(self, request: web.Request) -> Tuple[str, List[str]]:
@@ -1040,7 +1065,7 @@ class OpenChatSessionAdapter(BasePlatformAdapter):
         request["device_id"] = device_id
 
         peer_ip = request.remote
-        user, tags = await self._whois(peer_ip)
+        user, tags = await self._tailscale_whois(peer_ip)
         if user is not None:
             if (self._allowed_hosts
                     and user not in self._allowed_hosts
@@ -1056,12 +1081,7 @@ class OpenChatSessionAdapter(BasePlatformAdapter):
         token = auth[7:].strip() if auth.startswith("Bearer ") else ""
         if not token or not hmac.compare_digest(token, self._api_server_key):
             raise web.HTTPUnauthorized(reason="valid bearer token required")
-        return f"bearer:{peer_ip or 'local'}", []
-
-    def _session_key_for(self, sid: str) -> str:
-        # Mirrors build_session_key for our config (chat_type=group, no
-        # group_sessions_per_user, no thread_sessions_per_user).
-        return f"agent:main:{PLATFORM_NAME}:group:{sid}"
+        return f"bearer:{device_id}", []
 
     def _require_session(
         self, sid: str, *, include_archived: bool = False,
@@ -1130,13 +1150,15 @@ class OpenChatSessionAdapter(BasePlatformAdapter):
             "platform": PLATFORM_NAME,
             "sessions": len(self._sessions.list()),
             "caller": caller,
+            "gateway_api_version": "2026-05-15",
+            "server_time": _now_ms(),
         })
 
     async def _handle_sessions_list(self, request) -> web.Response:
         await self._authorize(request)
         include_archived = (
             request.query.get("include_archived", "").lower()
-            in ("1", "true", "yes")
+            in _TRUTHY
         )
         out = []
         for s in self._sessions.list(include_archived=include_archived):
@@ -1145,6 +1167,7 @@ class OpenChatSessionAdapter(BasePlatformAdapter):
                 **s.to_dict(),
                 "tip_seq": tip[0] if tip else 0,
                 "tip_hash": tip[1] if tip else "",
+                "event_count": tip[0] if tip else 0,
             })
         return web.json_response({"sessions": out})
 
@@ -1227,7 +1250,31 @@ class OpenChatSessionAdapter(BasePlatformAdapter):
             with contextlib.suppress(Exception):
                 if resp is not None:
                     await resp.write_eof()
-        return resp
+        return resp or web.Response(status=500)
+
+    def _resolve_inbound_attachments(
+        self, sid: str, attachments_in: List[str],
+    ) -> Tuple[List[str], List[str], List[dict]]:
+        media_urls: List[str] = []
+        media_types: List[str] = []
+        refs: List[dict] = []
+        for ref in attachments_in:
+            aid = ref.rsplit("/", 1)[-1].split(".", 1)[0]
+            res = self._attachments.info(aid)
+            if not res:
+                raise web.HTTPBadRequest(reason=f"unknown attachment {aid}")
+            info, path = res
+            public_url = f"/sessions/{sid}/attachments/{aid}"
+            media_urls.append(str(path))
+            media_types.append(info.mime)
+            refs.append({
+                "attachment_id": aid,
+                "url": public_url,
+                "mime": info.mime,
+                "size": info.size,
+                "sha256": aid,
+            })
+        return media_urls, media_types, refs
 
     async def _handle_session_message(self, request) -> web.Response:
         user, _ = await self._authorize(request)
@@ -1239,34 +1286,15 @@ class OpenChatSessionAdapter(BasePlatformAdapter):
         reply_to = body.get("reply_to")
         thread_id = body.get("thread_id")
 
-        media_urls: List[str] = []
-        media_types: List[str] = []
-        attachment_refs: List[dict] = []
-        for ref in attachments_in:
-            aid = ref.rsplit("/", 1)[-1].split(".", 1)[0]
-            res = self._attachments.info(aid)
-            if not res:
-                raise web.HTTPBadRequest(reason=f"unknown attachment {aid}")
-            info, path = res
-            public_url = f"/sessions/{sid}/attachments/{aid}"
-            media_urls.append(str(path))
-            media_types.append(info.mime)
-            attachment_refs.append({
-                "attachment_id": aid,
-                "url": public_url,
-                "mime": info.mime,
-                "size": info.size,
-                "sha256": aid,
-            })
+        media_urls, media_types, attachment_refs = (
+            self._resolve_inbound_attachments(sid, attachments_in)
+        )
 
         req_id = _new_id("i_")
         source = self.build_source(
             chat_id=sid,
             chat_type="group",
-            # Keep user_id empty so Hermes' central SessionStore does not
-            # append the HTTP caller identity to the session key. The native
-            # log payload still records the real caller as `author`.
-            user_id="",
+            user_id=user,
             user_name=user,
             chat_name=sess.name,
             thread_id=thread_id,
@@ -1274,7 +1302,11 @@ class OpenChatSessionAdapter(BasePlatformAdapter):
         )
         event = MessageEvent(
             text=text,
-            message_type=MessageType.TEXT,
+            message_type=(
+                MessageType.COMMAND
+                if text.lstrip().startswith("/")
+                else MessageType.TEXT
+            ),
             source=source,
             raw_message=body,
             message_id=req_id,
@@ -1370,7 +1402,7 @@ class OpenChatSessionAdapter(BasePlatformAdapter):
         tool_call_id = request.match_info["tool_call_id"]
         body = await _body_json(request)
         decision = body.get("decision", "")
-        if decision not in ("once", "session", "always", "deny"):
+        if decision not in APPROVAL_CHOICES:
             raise web.HTTPBadRequest(
                 reason="decision must be one of once/session/always/deny",
             )
@@ -1387,6 +1419,10 @@ class OpenChatSessionAdapter(BasePlatformAdapter):
                 },
                 status=409,
             )
+        pending = self._pending_approvals.pop(tool_call_id, None)
+        if pending is None:
+            raise web.HTTPNotFound(reason="unknown approval")
+
         ts = _now_ms()
         self._resolved_approvals[tool_call_id] = {
             "decision": decision,
@@ -1394,8 +1430,6 @@ class OpenChatSessionAdapter(BasePlatformAdapter):
             "sid": sid,
             "ts": ts,
         }
-
-        pending = self._pending_approvals.pop(tool_call_id, {})
         stream_id = pending.get("stream_id", tool_call_id)
         await self._log.append(
             sid, "gateway.approval.resolved", stream_id,
@@ -1406,13 +1440,9 @@ class OpenChatSessionAdapter(BasePlatformAdapter):
                 "resolved_at": ts,
             },
         )
-        # Prefer the session_key hermes gave us at send_exec_approval time
-        # (canonical) over our derived key — they should match but the
-        # pending entry wins if present.
-        session_key = pending.get("session_key") or self._session_key_for(sid)
         try:
             from tools.approval import resolve_gateway_approval
-            resolve_gateway_approval(session_key, decision)
+            resolve_gateway_approval(pending["session_key"], decision)
         except Exception as e:
             logger.warning("resolve_gateway_approval failed: %s", e)
 
@@ -1457,16 +1487,7 @@ class OpenChatSessionAdapter(BasePlatformAdapter):
         info, path = res
         if not path.exists():
             raise web.HTTPNotFound(reason="file missing")
-        resp = web.StreamResponse(headers={
-            "Content-Type": info.mime,
-            "Content-Length": str(info.size),
-        })
-        await resp.prepare(request)
-        with open(path, "rb") as f:
-            while chunk := f.read(64 * 1024):
-                await resp.write(chunk)
-        await resp.write_eof()
-        return resp
+        return web.FileResponse(path, headers={"Content-Type": info.mime})
 
     async def _handle_history(self, request) -> web.Response:
         await self._authorize(request)
@@ -1481,7 +1502,7 @@ class OpenChatSessionAdapter(BasePlatformAdapter):
         if seq is None:
             seq = 0
         events = self._log.range_after(sid, seq, limit=limit)
-        return web.json_response({"events": events})
+        return web.json_response({"events": [_wire_event(ev) for ev in events]})
 
 
 # ---------------------------------------------------------------------------
@@ -1525,9 +1546,7 @@ def _env_enablement() -> Optional[Dict[str, Any]]:
         "OPEN_CHAT_SESSION_AUTO_DEFAULT_SESSION", "",
     ).strip()
     if auto_default:
-        seed["auto_create_default_session"] = auto_default.lower() in (
-            "1", "true", "yes", "on",
-        )
+        seed["auto_create_default_session"] = auto_default.lower() in _TRUTHY
     return seed
 
 

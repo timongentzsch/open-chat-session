@@ -9,9 +9,8 @@
   },
   "dependencies": {
     "@assistant-ui/react": "^0.14.5",
-    "@assistant-ui/react-markdown": "^0.14.0",
-    "react-dom": "^19.2.0",
-    "remark-gfm": "^4.0.1"
+    "@assistant-ui/react-streamdown": "^0.3.0",
+    "react-dom": "^19.2.0"
   },
   "devDependencies": {
     "@types/react": "^19.2.14",

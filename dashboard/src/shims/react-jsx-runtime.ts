@@ -2,11 +2,16 @@
 // the automatic JSX transform; redirect those calls through the host's
 // React.createElement so there's only ever one React instance.
 
+import type React from "react";
 import R from "./react";
 
 export const Fragment = R.Fragment;
 
-export function jsx(type: any, props: any, key?: any) {
+export function jsx(
+  type: React.ElementType,
+  props: Record<string, unknown>,
+  key?: string,
+): React.ReactElement {
   return R.createElement(type, key !== undefined ? { ...props, key } : props);
 }
 

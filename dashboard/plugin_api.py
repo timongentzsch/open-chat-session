@@ -46,12 +46,12 @@ def _load_or_create_device_id() -> str:
             existing = _DEVICE_ID_FILE.read_text().strip()
             if existing:
                 return existing
-    except Exception:
+    except OSError:
         pass
     new = f"dashboard-{uuid.uuid4()}"
     try:
         _DEVICE_ID_FILE.write_text(new)
-    except Exception as exc:
+    except OSError as exc:
         log.warning("could not persist device id: %s", exc)
     return new
 
@@ -82,7 +82,7 @@ def _resolve_api_key() -> Optional[str]:
         cfg_val = cfg.get("API_SERVER_KEY")
         if isinstance(cfg_val, str) and cfg_val:
             return cfg_val
-    except Exception as exc:
+    except (ImportError, OSError, json.JSONDecodeError) as exc:
         log.warning("could not resolve API_SERVER_KEY from hermes config: %s", exc)
     return None
 
@@ -206,20 +206,9 @@ async def proxy(path: str, request: Request) -> Response:
         log.warning("gateway proxy error: %s", exc)
         raise HTTPException(status_code=502, detail=f"gateway error: {exc}")
 
-    content_type = upstream.headers.get("content-type", "")
-    if "application/octet-stream" in content_type or content_type.startswith(("image/", "video/", "audio/")):
-        async def passthrough() -> AsyncIterator[bytes]:
-            yield upstream.content
-        return StreamingResponse(
-            passthrough(),
-            status_code=upstream.status_code,
-            headers=_passthrough_response_headers(upstream.headers),
-            media_type=content_type or None,
-        )
-
     return Response(
         content=upstream.content,
         status_code=upstream.status_code,
         headers=_passthrough_response_headers(upstream.headers),
-        media_type=content_type or None,
+        media_type=upstream.headers.get("content-type") or None,
     )

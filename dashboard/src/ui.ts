@@ -5,7 +5,7 @@ export const controlBase =
   "inline-flex h-9 items-center justify-center rounded-md border text-xs transition focus:outline-none focus:ring-1 focus:ring-foreground/30 disabled:opacity-40";
 
 export const iconButton =
-  `${controlBase} w-9 border-midground/30 text-midground/70 hover:bg-foreground/[0.04] hover:text-foreground`;
+  `${controlBase} w-9 border-midground/30 text-midground/70 hover:bg-foreground/2 hover:text-foreground`;
 
 export const actionButton =
   `${controlBase} px-3 font-medium`;
@@ -23,3 +23,13 @@ export const composerIconStyle = {
   width: 36,
   minWidth: 36,
 };
+
+export function toneClass(kind: "success" | "warning" | "destructive" | "midground" | "idle"): string {
+  switch (kind) {
+    case "success": return "text-success";
+    case "warning": return "text-warning";
+    case "destructive": return "text-destructive";
+    case "midground": return "text-midground/70";
+    case "idle": return "text-midground/60";
+  }
+}

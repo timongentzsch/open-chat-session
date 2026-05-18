@@ -2,6 +2,8 @@
 
 First-party graphical chat for the gateway, mounted inside the existing `hermes dashboard` via the plugin extension system. Adds `/chat-session`; leaves built-in `/chat` untouched.
 
+Storage schema (event log + attachments) is documented in the root README.
+
 ```
 ~/.hermes/plugins/open_chat_session/
 dashboard/
@@ -16,7 +18,9 @@ dashboard/
     gateway-client.ts   - REST + SSE client
     runtime/            - session store + assistant-ui runtime
     hooks/              - session list, stream subscription, resume param
-    components/         - sidebar, thread, composer, approval rail, banners
+    components/         - ChatThread.tsx, MarkdownText.tsx, Composer.tsx,
+                          ApprovalPanel.tsx, AttachmentChip.tsx,
+                          SessionSidebar.tsx, StatusBanners.tsx
     pages/ChatPage.tsx
   dist/                 - Vite output, shipped in-tree
 ```

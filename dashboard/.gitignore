@@ -1,3 +1,7 @@
 node_modules/
-.device-id
+__pycache__/
+*.pyc
 *.tsbuildinfo
+.ruff_cache/
+.device-id
+.DS_Store

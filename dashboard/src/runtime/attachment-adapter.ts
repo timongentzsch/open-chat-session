@@ -1,17 +1,10 @@
 import type { AttachmentAdapter, CompleteAttachment, PendingAttachment } from "@assistant-ui/react";
 import type { GatewayClient } from "@/gateway-client";
 
-const ACCEPT = "image/*,video/*,audio/*,.pdf,.txt,.md,.json,.csv,.log";
+const ACCEPT = "*/*";
 
 function classify(file: File): "image" | "document" | "file" {
   if (file.type.startsWith("image/")) return "image";
-  if (
-    file.type.startsWith("text/") ||
-    file.type === "application/pdf" ||
-    file.type === "application/json"
-  ) {
-    return "document";
-  }
   return "file";
 }
 
@@ -49,7 +42,10 @@ export function createAttachmentAdapter(
     },
 
     async send(attachment: PendingAttachment): Promise<CompleteAttachment> {
-      if ((attachment.status as any)?.type === "incomplete" || String(attachment.id).startsWith("err-")) {
+      if (
+        attachment.status.type === "incomplete"
+        || attachment.id.startsWith("err-")
+      ) {
         throw new Error("attachment upload failed");
       }
       return {

@@ -1,7 +1,6 @@
 import { useMemo } from "../sdk";
 import { GatewayClient } from "../gateway-client";
-
-const PROXY_BASE = "/api/plugins/open-chat-session";
+import { PROXY_BASE } from "../constants";
 
 /** Stable GatewayClient instance — safe in `useEffect` deps. */
 export function useGatewayClient(): GatewayClient {

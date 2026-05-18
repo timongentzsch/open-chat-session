@@ -11,6 +11,7 @@ import type {
   CreateSessionRequest,
   EventEnvelope,
   GatewayEventKind,
+  Hash,
   HealthResponse,
   HistoryResponse,
   PatchSessionRequest,
@@ -19,15 +20,6 @@ import type {
   SessionsListResponse,
   StreamId,
 } from "./types";
-
-// Smooth over wire drift: envelopes may carry `data` instead of `payload`,
-// and SSE frames omit `kind` from the JSON body (it lives in the `event:`
-// header). REST history is unaffected.
-function normalizeEnvelope(raw: any, sseEventKind?: string): EventEnvelope {
-  if (raw && raw.payload === undefined && raw.data !== undefined) raw.payload = raw.data;
-  if (raw && raw.kind === undefined && sseEventKind) raw.kind = sseEventKind;
-  return raw as EventEnvelope;
-}
 
 export interface GatewayClientOpts {
   baseUrl: string;
@@ -68,7 +60,12 @@ export class GatewayClient {
     let code = fallbackCode;
     let message = body || res.statusText || `HTTP ${res.status}`;
     try {
-      const parsed = JSON.parse(body);
+      type ErrorBody = {
+        error?: { code?: string; message?: string };
+        code?: string;
+        message?: string;
+      };
+      const parsed = JSON.parse(body) as ErrorBody;
       code = parsed?.error?.code ?? parsed?.code ?? code;
       message = parsed?.error?.message ?? parsed?.message ?? message;
     } catch {
@@ -95,7 +92,7 @@ export class GatewayClient {
     for await (const frame of parseSSE(res)) {
       if (!frame.data) continue;
       try {
-        yield normalizeEnvelope(JSON.parse(frame.data), frame.event);
+        yield JSON.parse(frame.data) as EventEnvelope;
       } catch {
         // Ignore malformed frames; the next valid one re-anchors via hash chain.
       }
@@ -143,13 +140,13 @@ export class GatewayClient {
     sessionId: string,
     opts: { after?: string; limit?: number } = {},
   ): Promise<HistoryResponse> {
-    const body = await this.request<{ events: any[]; next_cursor?: string }>(
+    const body = await this.request<{ events: unknown[]; next_cursor?: Hash }>(
       `/sessions/${encodeURIComponent(sessionId)}/history`,
       undefined,
       { after: opts.after, limit: opts.limit ?? 100 },
     );
     return {
-      events: (body.events ?? []).map((raw) => normalizeEnvelope(raw)),
+      events: (body.events ?? []).map((raw) => raw as EventEnvelope),
       next_cursor: body.next_cursor,
     };
   }

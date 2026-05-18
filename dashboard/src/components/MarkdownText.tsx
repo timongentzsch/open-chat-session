@@ -1,28 +1,31 @@
 import { React, cn } from "@/sdk";
 import {
-  MarkdownTextPrimitive,
-  unstable_memoizeMarkdownComponents as memoizeMarkdownComponents,
-  useIsMarkdownCodeBlock,
-} from "@assistant-ui/react-markdown";
-import remarkGfm from "remark-gfm";
+  StreamdownTextPrimitive,
+  useIsStreamdownCodeBlock,
+} from "@assistant-ui/react-streamdown";
+import type { ExtraProps } from "streamdown";
+import type { ComponentPropsWithoutRef } from "react";
+import { MARKDOWN_COLOR_CSS } from "@/chat-styles";
 
 const md = {
   h1: "mb-2 text-base font-semibold first:mt-0 last:mb-0",
   h2: "mb-1.5 mt-3 text-sm font-semibold first:mt-0 last:mb-0",
   h3: "mb-1 mt-2.5 text-sm font-semibold first:mt-0 last:mb-0",
   p: "my-2 leading-relaxed first:mt-0 last:mb-0",
-  list: "my-2 ml-4 marker:text-midground/70 [&>li]:mt-1",
+  list: "my-2 pl-5 marker:text-midground/70 [&>li]:mt-1",
   quote: "my-2 border-l-2 border-midground/30 pl-3 text-midground/80",
   cell: "border-b border-midground/20 px-2 py-1 text-left",
 };
 
-const components = memoizeMarkdownComponents({
-  h1: ({ className, ...props }: any) => <h1 className={cn(md.h1, className)} {...props} />,
-  h2: ({ className, ...props }: any) => <h2 className={cn(md.h2, className)} {...props} />,
-  h3: ({ className, ...props }: any) => <h3 className={cn(md.h3, className)} {...props} />,
-  h4: ({ className, ...props }: any) => <h4 className={cn(md.h3, className)} {...props} />,
-  p: ({ className, ...props }: any) => <p className={cn(md.p, className)} {...props} />,
-  a: ({ className, ...props }: any) => (
+type HP<T extends keyof React.JSX.IntrinsicElements> = ComponentPropsWithoutRef<T> & ExtraProps;
+
+const components = {
+  h1: ({ className, ...props }: HP<"h1">) => <h1 className={cn(md.h1, className)} {...props} />,
+  h2: ({ className, ...props }: HP<"h2">) => <h2 className={cn(md.h2, className)} {...props} />,
+  h3: ({ className, ...props }: HP<"h3">) => <h3 className={cn(md.h3, className)} {...props} />,
+  h4: ({ className, ...props }: HP<"h4">) => <h4 className={cn(md.h3, className)} {...props} />,
+  p: ({ className, ...props }: HP<"p">) => <p className={cn(md.p, className)} {...props} />,
+  a: ({ className, ...props }: HP<"a">) => (
     <a
       className={cn("underline underline-offset-2 hover:text-emerald-300", className)}
       target="_blank"
@@ -30,27 +33,27 @@ const components = memoizeMarkdownComponents({
       {...props}
     />
   ),
-  blockquote: ({ className, ...props }: any) => (
+  blockquote: ({ className, ...props }: HP<"blockquote">) => (
     <blockquote className={cn(md.quote, className)} {...props} />
   ),
-  ul: ({ className, ...props }: any) => (
+  ul: ({ className, ...props }: HP<"ul">) => (
     <ul className={cn(md.list, "list-disc", className)} {...props} />
   ),
-  ol: ({ className, ...props }: any) => (
+  ol: ({ className, ...props }: HP<"ol">) => (
     <ol className={cn(md.list, "list-decimal", className)} {...props} />
   ),
-  li: ({ className, ...props }: any) => <li className={cn("leading-relaxed", className)} {...props} />,
-  table: ({ className, ...props }: any) => (
+  li: ({ className, ...props }: HP<"li">) => <li className={cn("leading-relaxed", className)} {...props} />,
+  table: ({ className, ...props }: HP<"table">) => (
     <table
       className={cn("my-2 block max-w-full overflow-x-auto border-separate border-spacing-0 text-xs", className)}
       {...props}
     />
   ),
-  th: ({ className, ...props }: any) => (
+  th: ({ className, ...props }: HP<"th">) => (
     <th className={cn(md.cell, "border-t font-medium text-midground/90", className)} {...props} />
   ),
-  td: ({ className, ...props }: any) => <td className={cn(md.cell, className)} {...props} />,
-  pre: ({ className, ...props }: any) => (
+  td: ({ className, ...props }: HP<"td">) => <td className={cn(md.cell, className)} {...props} />,
+  pre: ({ className, ...props }: HP<"pre">) => (
     <pre
       className={cn(
         "my-2 max-w-full overflow-x-auto rounded-md border border-midground/20 bg-black/20 p-2 text-xs leading-relaxed",
@@ -59,10 +62,11 @@ const components = memoizeMarkdownComponents({
       {...props}
     />
   ),
-  code: ({ className, ...props }: any) => {
-    const block = useIsMarkdownCodeBlock();
+  code: ({ className, ...props }: HP<"code">) => {
+    const block = useIsStreamdownCodeBlock();
     return (
       <code
+        data-aui-ocs-code={block ? "block" : "inline"}
         className={cn(
           !block && "rounded border border-midground/20 bg-black/20 px-1 py-0.5 text-[0.9em]",
           className,
@@ -71,14 +75,17 @@ const components = memoizeMarkdownComponents({
       />
     );
   },
-});
+};
 
 export const MarkdownText = React.memo(function MarkdownText() {
   return (
-    <MarkdownTextPrimitive
-      className={cn("min-w-0 break-words")}
-      components={components}
-      remarkPlugins={[remarkGfm]}
-    />
+    <>
+      <style precedence="default">{MARKDOWN_COLOR_CSS}</style>
+      <StreamdownTextPrimitive
+        className={cn("ocs-markdown min-w-0 break-words text-foreground")}
+        components={components}
+        controls={false}
+      />
+    </>
   );
 });

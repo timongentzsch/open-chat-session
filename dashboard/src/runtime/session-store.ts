@@ -50,7 +50,7 @@ export interface SessionState {
   resyncing: boolean;
 }
 
-export function initialSessionState(): SessionState {
+function initialSessionState(): SessionState {
   return {
     messages: [],
     attachments: {},
@@ -128,6 +128,7 @@ export class SessionStore {
 
     switch (env.kind) {
       case "gateway.message.in": {
+        if (!env.payload || typeof env.payload !== "object") return false;
         const p = env.payload as MessageInPayload;
         const id = p.message_id ?? `synthetic:${env.hash}`;
         this.upsertMessage({
@@ -138,6 +139,7 @@ export class SessionStore {
         return true;
       }
       case "gateway.message.out": {
+        if (!env.payload || typeof env.payload !== "object") return false;
         const p = env.payload as MessageOutPayload;
         const finalized = !isMidStream(p.content, env.ts);
         this.upsertMessage({
@@ -151,6 +153,7 @@ export class SessionStore {
         return true;
       }
       case "gateway.message.edit": {
+        if (!env.payload || typeof env.payload !== "object") return false;
         const p = env.payload as MessageEditPayload;
         const finalized = !!p.finalize || !isMidStream(p.content, env.ts);
         const existing = this.findMessage(p.message_id);
@@ -168,6 +171,7 @@ export class SessionStore {
         return true;
       }
       case "gateway.typing": {
+        if (!env.payload || typeof env.payload !== "object") return false;
         const p = env.payload as TypingPayload;
         this.set({ typingTs: p.active === false ? 0 : env.ts });
         return true;
@@ -177,6 +181,7 @@ export class SessionStore {
       case "gateway.animation":
       case "gateway.document":
       case "gateway.voice": {
+        if (!env.payload || typeof env.payload !== "object") return false;
         const p = env.payload as {
           message_id?: string;
           attachments?: unknown;
@@ -214,6 +219,7 @@ export class SessionStore {
         return true;
       }
       case "gateway.error": {
+        if (!env.payload || typeof env.payload !== "object") return false;
         const p = env.payload as { message?: string; code?: string };
         this.set({
           errorBanner: p.message || p.code || "stream error",
@@ -255,12 +261,11 @@ export class SessionStore {
   }
 
   private applyApprovalRequest(env: EventEnvelope): void {
-    // `prompt` is Phase-3 canonical; legacy logs may carry only `description`.
-    const p = env.payload as ApprovalRequestPayload & { description?: string };
+    const p = env.payload as ApprovalRequestPayload;
     const view: ApprovalView = {
       tool_call_id: p.tool_call_id,
       tool_name: p.tool_name ?? "exec",
-      prompt: p.prompt ?? p.description ?? p.command ?? "",
+      prompt: p.prompt ?? "",
       command: p.command,
       args: p.args as Record<string, unknown> | undefined,
       choices: p.choices ?? APPROVAL_DEFAULT_CHOICES,
@@ -273,7 +278,7 @@ export class SessionStore {
   }
 
   private applyApprovalResolved(env: EventEnvelope): void {
-    const p = env.payload as ApprovalResolvedPayload & { by?: string };
+    const p = env.payload as ApprovalResolvedPayload;
     const existing = this.state.approvals[p.tool_call_id];
     if (!existing) return;
     this.set({
@@ -284,7 +289,7 @@ export class SessionStore {
           status: "resolved",
           resolution: {
             decision: p.decision,
-            resolved_by: p.resolved_by ?? p.by ?? "",
+            resolved_by: p.resolved_by ?? "",
             resolved_at: p.resolved_at ?? env.ts,
           },
         },
@@ -293,16 +298,9 @@ export class SessionStore {
   }
 }
 
-// Smooth over pre-Phase-3 logs where `attachments` were URL strings.
 function normalizeAttachmentRefs(refs: unknown): AttachmentRef[] {
   if (!Array.isArray(refs)) return [];
   return refs.flatMap((r): AttachmentRef[] => {
-    if (typeof r === "string") {
-      const m = r.match(/\/attachments\/([^/?#]+)/);
-      return [{
-        attachment_id: m?.[1] ?? r, url: r, mime: "", size: 0, sha256: "",
-      }];
-    }
     if (r && typeof r === "object") {
       const o = r as Partial<AttachmentRef>;
       return [{

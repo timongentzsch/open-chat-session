@@ -21,8 +21,7 @@ export type ConnState =
   | { kind: "idle" }
   | { kind: "connecting" }
   | { kind: "connected" }
-  | { kind: "reconnecting"; nextDelayMs: number; lastError: string }
-  | { kind: "error"; message: string };
+  | { kind: "reconnecting"; nextDelayMs: number; lastError: string };
 
 export interface UseSessionRuntimeResult {
   state: SessionState;
@@ -157,7 +156,7 @@ export function useSessionRuntime(
         .map((p) => p.text)
         .join("");
       const attachments = (msg.attachments ?? [])
-        .map((a) => (a as any).id)
+        .map((a) => a.id)
         .filter((id): id is string => typeof id === "string" && !id.startsWith("err-"));
       if (!text.trim() && attachments.length === 0) return;
       const gen = client.sendMessage(sessionId, { text, attachments });

@@ -151,14 +151,10 @@ export interface SendMessageRequest {
   metadata?: JsonObject;
 }
 
+// The gateway sends additional fields; the dashboard only reads `platform`.
 export interface HealthResponse {
-  ok: boolean;
-  platform?: string;
-  sessions?: number;
-  caller?: string;
-  gateway_api_version?: string;
-  server_time?: UnixMs;
-  [k: string]: unknown;
+  ok: true;
+  platform: "open_chat_session";
 }
 
 export interface SessionsListResponse {

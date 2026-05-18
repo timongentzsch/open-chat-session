@@ -16,10 +16,9 @@ type HermesPluginSDK = {
     useMemo: typeof ReactNS.useMemo;
     useRef: typeof ReactNS.useRef;
   };
-  components: Record<string, any>;
+  components: Record<string, unknown>;
   utils: {
-    cn: (...args: any[]) => string;
-    timeAgo: (ms: number) => string;
+    cn: (...args: unknown[]) => string;
   };
 };
 
@@ -56,10 +55,6 @@ export const {
 } = SDK.hooks;
 // `useSyncExternalStore` isn't in `SDK.hooks` but is on the React module.
 export const useSyncExternalStore: typeof ReactNS.useSyncExternalStore =
-  (SDK.React as any).useSyncExternalStore;
+  SDK.React.useSyncExternalStore;
 
-// UI primitives — typed loosely; the host design system is the source of truth.
-export const Button: any = SDK.components.Button;
-
-export const cn: (...args: any[]) => string = SDK.utils.cn;
-export const timeAgo: (ms: number) => string = SDK.utils.timeAgo;
+export const cn: (...args: unknown[]) => string = SDK.utils.cn;
