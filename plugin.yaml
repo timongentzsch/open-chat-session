@@ -6,8 +6,20 @@ description: >
   Runs alongside hermes's stock api_server (does not replace it). Auth via
   Tailscale identity or bearer token fallback.
 author: Timon Gentzsch
-requires_env:
-  - name: OPEN_CHAT_SESSION_BIND
-    description: "Bind address, e.g. 0.0.0.0:8765 (host-network) or 127.0.0.1:8765 (loopback only)"
+optional_env:
+  - name: OPEN_CHAT_SESSION_EDGE_BIND
+    description: "Tailnet edge bind address. Defaults to 127.0.0.1:9120."
     prompt: "Bind address (host:port)"
+    password: false
+  - name: OPEN_CHAT_SESSION_BIND
+    description: "Native gateway bind address. Defaults to 127.0.0.1:8765."
+    prompt: "Gateway bind address (host:port)"
+    password: false
+  - name: OPEN_CHAT_SESSION_EDGE_ENABLED
+    description: "Enable the plugin-owned Tailscale Serve edge proxy. Defaults to true."
+    prompt: "Enable tailnet edge proxy"
+    password: false
+  - name: OPEN_CHAT_SESSION_EDGE_DASHBOARD_URL
+    description: "Loopback Hermes dashboard URL proxied by the edge. Defaults to http://127.0.0.1:9119."
+    prompt: "Hermes dashboard URL"
     password: false

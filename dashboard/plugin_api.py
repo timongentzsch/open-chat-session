@@ -141,6 +141,13 @@ def _passthrough_response_headers(upstream_headers: httpx.Headers) -> dict[str, 
     }
 
 
+# PWA assets (sw.js, manifest.webmanifest, icons/*.png) live in
+# dashboard/public/ and are served by the host's /dashboard-plugins/<name>/...
+# static route at hermes_cli/web_server.py:4308. That route bypasses the
+# session-token middleware which is necessary because the browser fetches
+# service workers, manifests, and notification icons without our custom
+# auth header. No host change required.
+
 @router.api_route(
     "/{path:path}",
     methods=["GET", "POST", "PATCH", "DELETE", "PUT", "OPTIONS"],

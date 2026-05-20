@@ -1,0 +1,9 @@
+# Python deps for open-chat-session.
+#
+# Hermes plugins share the host venv. Install with:
+#   ~/.hermes/hermes-agent/venv/bin/python -m pip install -r requirements.txt
+#
+# aiohttp + cryptography are already pulled in transitively by Hermes;
+# pywebpush is the only one the plugin adds (Phase 4 push delivery).
+
+pywebpush>=2.0.0
