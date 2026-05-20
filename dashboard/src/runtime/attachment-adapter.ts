@@ -1,10 +1,15 @@
 import type { AttachmentAdapter, CompleteAttachment, PendingAttachment } from "@assistant-ui/react";
 import type { GatewayClient } from "@/gateway-client";
+import { ERR_ID_PREFIX } from "@/constants";
 
-const ACCEPT = "*/*";
+// assistant-ui's fileMatchesAccept uses the bare "*" sentinel for "anything".
+// "*/*" looks right but fails — it's treated as a MIME pattern and
+// `"foo/bar".startsWith("*/")` is false, so every file is rejected.
+const ACCEPT = "*";
 
-function classify(file: File): "image" | "document" | "file" {
+function classify(file: File): "image" | "audio" | "document" | "file" {
   if (file.type.startsWith("image/")) return "image";
+  if (file.type.startsWith("audio/")) return "audio";
   return "file";
 }
 
@@ -31,7 +36,7 @@ export function createAttachmentAdapter(
         };
       } catch (exc) {
         return {
-          id: `err-${Date.now()}`,
+          id: `${ERR_ID_PREFIX}${Date.now()}`,
           type: classify(file),
           name: file.name,
           contentType: file.type,
@@ -44,7 +49,7 @@ export function createAttachmentAdapter(
     async send(attachment: PendingAttachment): Promise<CompleteAttachment> {
       if (
         attachment.status.type === "incomplete"
-        || attachment.id.startsWith("err-")
+        || attachment.id.startsWith(ERR_ID_PREFIX)
       ) {
         throw new Error("attachment upload failed");
       }

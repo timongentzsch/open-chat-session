@@ -1,23 +1,14 @@
 import { React, cn } from "@/sdk";
 import type { ConnState } from "@/runtime/external-runtime";
-import { controlBase, toneClass } from "@/ui";
+import { controlBase, PILL_TONES, BANNER_TEXT_TONES, BANNER_BORDER, type BannerTone } from "@/ui";
 import { BANNER_CSS } from "@/chat-styles";
 
-// Match Hermes' own status-label aesthetic (see "Gateway Status: Running" in
-// the sidebar): just a colored Mondwest label, no border/pill chrome.
-const PILL_TONES: Record<ConnState["kind"], string> = {
-  idle: toneClass("idle"),
-  connecting: toneClass("warning"),
-  connected: toneClass("success"),
-  reconnecting: "text-warning/80",
-};
-
-function pillText(conn: ConnState, platform?: string, healthError?: string | null): string {
+function pillText(conn: ConnState, _platform?: string, healthError?: string | null): string {
   switch (conn.kind) {
     case "idle": return "idle";
     case "connecting": return "connecting";
-    case "connected": return healthError ? "stream live · health stale" : platform ? `stream live · ${platform}` : "stream live";
-    case "reconnecting": return `retrying in ${Math.round(conn.nextDelayMs / 1000)}s`;
+    case "connected": return healthError ? "live · stale" : "live";
+    case "reconnecting": return `retry ${Math.round(conn.nextDelayMs / 1000)}s`;
     default: {
       const _exhaustive: never = conn;
       return "";
@@ -47,25 +38,11 @@ export function ConnectionPill({
       )}
       title={title}
     >
-      <span className={cn("h-1.5 w-1.5 rounded-full bg-current")} aria-hidden />
+      <span className={cn("h-1.5 w-1.5 bg-current")} aria-hidden />
       {pillText(conn, platform, healthError)}
     </span>
   );
 }
-
-type BannerTone = "rose" | "amber" | "midground";
-
-const BANNER_TEXT_TONES: Record<BannerTone, string> = {
-  rose: toneClass("destructive"),
-  amber: toneClass("warning"),
-  midground: toneClass("midground"),
-};
-
-const BANNER_BORDER: Record<BannerTone, string> = {
-  rose: "border-rose-500/40",
-  amber: "border-amber-500/40",
-  midground: "border-midground/30",
-};
 
 export function Banner({
   tone,
@@ -93,6 +70,7 @@ export function Banner({
           <span>{message}</span>
           {onDismiss && (
             <button
+              data-aui-ocs-control
               type="button"
               className={cn(controlBase, "h-7 border-midground/30 px-2 text-[11px] text-midground/70 hover:text-foreground")}
               onClick={onDismiss}

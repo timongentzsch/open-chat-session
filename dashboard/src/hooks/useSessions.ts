@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "../sdk";
 import type { GatewayClient } from "../gateway-client";
+import { errorMessage } from "../errors";
 import type { SessionInfo } from "../types";
 
 export interface UseSessionsResult {
@@ -8,7 +9,6 @@ export interface UseSessionsResult {
   error: string | null;
   refresh: () => Promise<void>;
   createSession: (name?: string) => Promise<SessionInfo | null>;
-  archive: (id: string) => Promise<void>;
 }
 
 export function useSessions(client: GatewayClient): UseSessionsResult {
@@ -22,7 +22,7 @@ export function useSessions(client: GatewayClient): UseSessionsResult {
       setSessions(list);
       setError(null);
     } catch (exc) {
-      setError(exc instanceof Error ? exc.message : String(exc));
+      setError(errorMessage(exc));
     } finally {
       setLoading(false);
     }
@@ -39,24 +39,12 @@ export function useSessions(client: GatewayClient): UseSessionsResult {
         await refresh();
         return s;
       } catch (exc) {
-        setError(exc instanceof Error ? exc.message : String(exc));
+        setError(errorMessage(exc));
         return null;
       }
     },
     [client, refresh],
   );
 
-  const archive = useCallback(
-    async (id: string) => {
-      try {
-        await client.archiveSession(id);
-        await refresh();
-      } catch (exc) {
-        setError(exc instanceof Error ? exc.message : String(exc));
-      }
-    },
-    [client, refresh],
-  );
-
-  return { sessions, loading, error, refresh, createSession, archive };
+  return { sessions, loading, error, refresh, createSession };
 }

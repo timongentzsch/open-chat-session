@@ -1,6 +1,8 @@
 import { React, cn, useEffect, useState } from "@/sdk";
 import type { AttachmentRef } from "@/types";
-import { PROXY_BASE, authHeaders, humanSize } from "@/constants";
+import { PROXY_BASE, authHeaders, humanSize, BLOB_URL_CLEANUP_MS } from "@/constants";
+import { SURFACE_CSS } from "@/chat-styles";
+import { DownloadIcon, FileIcon } from "@/components/icons";
 
 type RenderKind = "image" | "video" | "audio" | "file";
 
@@ -54,34 +56,7 @@ function downloadBlob(blob: Blob, name: string): void {
   document.body.appendChild(a);
   a.click();
   a.remove();
-  window.setTimeout(() => URL.revokeObjectURL(objectUrl), 30_000);
-}
-
-function DownloadIcon() {
-  return (
-    <svg
-      width="16" height="16" viewBox="0 0 24 24" fill="none"
-      stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"
-      aria-hidden="true"
-    >
-      <path d="M12 3v11" />
-      <path d="m7 10 5 5 5-5" />
-      <path d="M5 21h14" />
-    </svg>
-  );
-}
-
-function FileIcon() {
-  return (
-    <svg
-      width="18" height="18" viewBox="0 0 24 24" fill="none"
-      stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"
-      aria-hidden="true"
-    >
-      <path d="M14 2H7a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7z" />
-      <path d="M14 2v5h5" />
-    </svg>
-  );
+  window.setTimeout(() => URL.revokeObjectURL(objectUrl), BLOB_URL_CLEANUP_MS);
 }
 
 function useAttachmentLink(attachment: AttachmentRef, sessionId: string, preview: boolean) {
@@ -135,9 +110,9 @@ export function AttachmentChip({
     const label = `Download ${name}`;
     const content = downloadState === "loading" ? "..." : downloadState === "error" ? "!" : <DownloadIcon />;
     const className = cn(
-      "flex h-8 w-8 shrink-0 items-center justify-center rounded border border-midground/20 text-midground/70",
+      "flex h-8 w-8 shrink-0 items-center justify-center border border-midground/20 text-midground/70",
       "transition hover:border-midground/45 hover:text-foreground",
-      downloadState === "error" && "border-rose-500/40 text-rose-300",
+      downloadState === "error" && "border-destructive/40 text-destructive",
     );
     if (!sameOrigin) {
       return (
@@ -148,6 +123,7 @@ export function AttachmentChip({
     }
     return (
       <button
+        data-aui-ocs-control
         type="button"
         onClick={handleDownload}
         disabled={downloadState === "loading"}
@@ -172,10 +148,13 @@ export function AttachmentChip({
 
   if (inline && kind === "image") {
     return (
-      <div className="block max-w-[18rem] overflow-hidden rounded-md border border-midground/25 bg-background/30 hover:border-midground/45">
+      <div
+        data-aui-ocs-attachment
+        className="block max-w-[18rem] overflow-hidden border border-midground/25 bg-background/30 hover:border-midground/45"
+      >
         <a {...anchorProps} className="block">
           {imageSrc ? (
-            <img src={imageSrc} alt="" loading="lazy" className="max-h-64 w-full bg-black/20 object-contain" />
+            <img src={imageSrc} alt="" loading="lazy" className="max-h-64 w-full bg-background/30 object-contain" />
           ) : (
             <div className="flex h-28 items-center justify-center text-xs text-midground/50">loading image</div>
           )}
@@ -187,9 +166,12 @@ export function AttachmentChip({
 
   if (inline && kind === "video") {
     return (
-      <div className="max-w-[22rem] overflow-hidden rounded-md border border-midground/25 bg-background/30">
+      <div
+        data-aui-ocs-attachment
+        className="max-w-[22rem] overflow-hidden border border-midground/25 bg-background/30"
+      >
         {imageSrc ? (
-          <video src={imageSrc} controls className="max-h-72 w-full bg-black/30" />
+          <video src={imageSrc} controls className="max-h-72 w-full bg-background/30" />
         ) : (
           <div className="flex h-28 items-center justify-center text-xs text-midground/50">loading video</div>
         )}
@@ -200,7 +182,10 @@ export function AttachmentChip({
 
   if (inline && kind === "audio") {
     return (
-      <div className="max-w-[22rem] overflow-hidden rounded-md border border-midground/25 bg-background/30">
+      <div
+        data-aui-ocs-attachment
+        className="max-w-[22rem] overflow-hidden border border-midground/25 bg-background/30"
+      >
         <div className="p-2">
           {imageSrc ? (
             <audio src={imageSrc} controls className="w-full" />
@@ -215,24 +200,26 @@ export function AttachmentChip({
 
   return (
     <a
+      data-aui-ocs-attachment
       {...anchorProps}
       download={!sameOrigin ? name : undefined}
       onClick={handleDownload}
       aria-label={`Download ${name}`}
       style={{ width: "18rem", maxWidth: "100%" }}
       className={cn(
-        "inline-flex min-h-14 items-center gap-3 rounded-md border border-midground/30 bg-background/30 px-3 py-2 text-xs",
+        "inline-flex min-h-14 items-center gap-3 border border-midground/30 bg-background/30 px-3 py-2 text-xs",
         "text-midground/80 transition hover:border-midground/50 hover:text-foreground",
-        downloadState === "error" && "border-rose-500/40 text-rose-300",
+        downloadState === "error" && "border-destructive/40 text-destructive",
       )}
     >
+      <style precedence="default">{SURFACE_CSS}</style>
       <span
         aria-hidden
+        data-aui-ocs-surface="mid"
         className={cn(
-          "flex h-9 w-9 shrink-0 items-center justify-center rounded border border-midground/20",
+          "flex h-9 w-9 shrink-0 items-center justify-center border border-midground/20",
           "text-midground/70",
         )}
-        style={{ background: "color-mix(in srgb, var(--foreground-base, #fff) 4%, transparent)" }}
       >
         <FileIcon />
       </span>
@@ -242,7 +229,7 @@ export function AttachmentChip({
       </span>
       <span
         aria-hidden
-        className="flex h-8 w-8 shrink-0 items-center justify-center rounded border border-midground/20 text-midground/70"
+        className="flex h-8 w-8 shrink-0 items-center justify-center border border-midground/20 text-midground/70"
       >
         {downloadState === "loading" ? "..." : downloadState === "error" ? "!" : <DownloadIcon />}
       </span>

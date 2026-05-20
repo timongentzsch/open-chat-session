@@ -27,7 +27,7 @@ const components = {
   p: ({ className, ...props }: HP<"p">) => <p className={cn(md.p, className)} {...props} />,
   a: ({ className, ...props }: HP<"a">) => (
     <a
-      className={cn("underline underline-offset-2 hover:text-emerald-300", className)}
+      className={cn("underline underline-offset-2 hover:text-success", className)}
       target="_blank"
       rel="noreferrer"
       {...props}
@@ -56,7 +56,7 @@ const components = {
   pre: ({ className, ...props }: HP<"pre">) => (
     <pre
       className={cn(
-        "my-2 max-w-full overflow-x-auto rounded-md border border-midground/20 bg-black/20 p-2 text-xs leading-relaxed",
+        "my-2 max-w-full overflow-x-auto border border-midground/20 bg-background/30 p-2 text-xs leading-relaxed",
         className,
       )}
       {...props}
@@ -68,7 +68,7 @@ const components = {
       <code
         data-aui-ocs-code={block ? "block" : "inline"}
         className={cn(
-          !block && "rounded border border-midground/20 bg-black/20 px-1 py-0.5 text-[0.9em]",
+          !block && "border border-midground/20 bg-background/30 px-1 py-0.5 text-[0.9em]",
           className,
         )}
         {...props}

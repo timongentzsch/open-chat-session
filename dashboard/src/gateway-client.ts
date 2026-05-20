@@ -4,22 +4,40 @@
 // token. Streaming methods yield via async generators — break to
 // close via the caller's AbortController.
 
-import { GatewayError } from "./errors";
+import { GatewayError, errorMessage, isEventEnvelope } from "./errors";
+import {
+  CLIENT_DEVICE_ID_HEADER,
+  DEFAULT_BACKFILL_COUNT,
+  getOrCreateClientDeviceId,
+} from "./constants";
 import { parseSSE } from "./parse-sse";
 import type {
   AttachmentInfo,
   CreateSessionRequest,
   EventEnvelope,
-  GatewayEventKind,
   Hash,
   HealthResponse,
   HistoryResponse,
-  PatchSessionRequest,
+  PushDevice,
+  RegisterPushDeviceRequest,
   SendMessageRequest,
   SessionInfo,
   SessionsListResponse,
   StreamId,
+  VapidPublicKeyResponse,
 } from "./types";
+
+type ErrorBody = {
+  error?: { code?: string; message?: string };
+  code?: string;
+  message?: string;
+};
+
+function isErrorBody(v: unknown): v is ErrorBody {
+  return typeof v === "object" && v !== null && (
+    "error" in v || "code" in v || "message" in v
+  );
+}
 
 export interface GatewayClientOpts {
   baseUrl: string;
@@ -51,6 +69,7 @@ export class GatewayClient {
     const headers = new Headers(init.headers);
     const token = window.__HERMES_SESSION_TOKEN__;
     if (token) headers.set("X-Hermes-Session-Token", token);
+    headers.set(CLIENT_DEVICE_ID_HEADER, getOrCreateClientDeviceId());
     return { ...init, headers };
   }
 
@@ -60,16 +79,12 @@ export class GatewayClient {
     let code = fallbackCode;
     let message = body || res.statusText || `HTTP ${res.status}`;
     try {
-      type ErrorBody = {
-        error?: { code?: string; message?: string };
-        code?: string;
-        message?: string;
-      };
-      const parsed = JSON.parse(body) as ErrorBody;
+      const raw: unknown = JSON.parse(body);
+      const parsed: ErrorBody = isErrorBody(raw) ? raw : {};
       code = parsed?.error?.code ?? parsed?.code ?? code;
       message = parsed?.error?.message ?? parsed?.message ?? message;
-    } catch {
-      // plain text body
+    } catch (exc) {
+      message = errorMessage(exc) || message;
     }
     throw new GatewayError(res.status, code, message, body);
   }
@@ -87,12 +102,19 @@ export class GatewayClient {
     return fetch(this.url(path, params), this.auth(init)).then((res) => this.json<T>(res));
   }
 
+  private async requestVoid(path: string, fallbackCode: string, init?: RequestInit): Promise<void> {
+    const res = await fetch(this.url(path), this.auth(init));
+    await this.expect(res, fallbackCode);
+  }
+
   private async *eventsFrom(res: Response, fallbackCode: string): AsyncGenerator<EventEnvelope> {
     await this.expect(res, fallbackCode);
     for await (const frame of parseSSE(res)) {
       if (!frame.data) continue;
       try {
-        yield JSON.parse(frame.data) as EventEnvelope;
+        const parsed: unknown = JSON.parse(frame.data);
+        if (!isEventEnvelope(parsed)) continue;
+        yield parsed;
       } catch {
         // Ignore malformed frames; the next valid one re-anchors via hash chain.
       }
@@ -120,22 +142,6 @@ export class GatewayClient {
     });
   }
 
-  patchSession(sessionId: string, req: PatchSessionRequest): Promise<SessionInfo> {
-    return this.request<SessionInfo>(`/sessions/${encodeURIComponent(sessionId)}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(req),
-    });
-  }
-
-  async archiveSession(sessionId: string): Promise<void> {
-    const res = await fetch(
-      this.url(`/sessions/${encodeURIComponent(sessionId)}`),
-      this.auth({ method: "DELETE" }),
-    );
-    await this.expect(res, "archive_failed");
-  }
-
   async history(
     sessionId: string,
     opts: { after?: string; limit?: number } = {},
@@ -146,21 +152,21 @@ export class GatewayClient {
       { after: opts.after, limit: opts.limit ?? 100 },
     );
     return {
-      events: (body.events ?? []).map((raw) => raw as EventEnvelope),
+      events: (body.events ?? []).filter(isEventEnvelope),
       next_cursor: body.next_cursor,
     };
   }
 
   async cancelStream(sessionId: string, streamId: StreamId): Promise<void> {
-    const res = await fetch(
-      this.url(`/sessions/${encodeURIComponent(sessionId)}/cancel`),
-      this.auth({
+    await this.requestVoid(
+      `/sessions/${encodeURIComponent(sessionId)}/cancel`,
+      "cancel_failed",
+      {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ stream_id: streamId }),
-      }),
+      },
     );
-    await this.expect(res, "cancel_failed");
   }
 
   uploadAttachment(sessionId: string, file: File, caption?: string): Promise<AttachmentInfo> {
@@ -173,15 +179,26 @@ export class GatewayClient {
     );
   }
 
-  async downloadAttachment(sessionId: string, attachmentId: string): Promise<Blob> {
-    const res = await fetch(
-      this.url(
-        `/sessions/${encodeURIComponent(sessionId)}/attachments/${encodeURIComponent(attachmentId)}`,
-      ),
-      this.auth(),
+  // --- Push devices (Phase 4) ---
+
+  getVapidPublicKey(): Promise<VapidPublicKeyResponse> {
+    return this.request<VapidPublicKeyResponse>("/devices/push/vapid-public-key");
+  }
+
+  registerPushDevice(req: RegisterPushDeviceRequest): Promise<PushDevice> {
+    return this.request<PushDevice>("/devices/push", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(req),
+    });
+  }
+
+  async deletePushDevice(deviceId: string): Promise<void> {
+    await this.requestVoid(
+      `/devices/push/${encodeURIComponent(deviceId)}`,
+      "push_unregister_failed",
+      { method: "DELETE" },
     );
-    await this.expect(res, "attachment_fetch_failed");
-    return res.blob();
   }
 
   async respondToApproval(
@@ -210,7 +227,7 @@ export class GatewayClient {
     const params: Record<string, string> = {};
     if (cursor.cursor === "snapshot") params.cursor = "snapshot";
     else if (cursor.cursor === "genesis") params.cursor = "genesis";
-    else if (cursor.cursor === "latest") params.cursor = `latest:${cursor.latestN ?? 200}`;
+    else if (cursor.cursor === "latest") params.cursor = `latest:${cursor.latestN ?? DEFAULT_BACKFILL_COUNT}`;
     else if (cursor.cursor) params.cursor = cursor.cursor;
 
     const headers: HeadersInit = { Accept: "text/event-stream" };
@@ -241,5 +258,3 @@ export class GatewayClient {
     yield* this.eventsFrom(res, "send_failed");
   }
 }
-
-export type { EventEnvelope, GatewayEventKind } from "./types";

@@ -16,6 +16,7 @@ import {
 } from "@/runtime/session-store";
 import { getLastHash, setLastHash } from "@/runtime/resume";
 import { createAttachmentAdapter } from "@/runtime/attachment-adapter";
+import { ERR_ID_PREFIX } from "@/constants";
 
 export type ConnState =
   | { kind: "idle" }
@@ -28,6 +29,7 @@ export interface UseSessionRuntimeResult {
   store: SessionStore;
   runtime: ReturnType<typeof useExternalStoreRuntime>;
   conn: ConnState;
+  isTyping: boolean;
 }
 
 const TYPING_MS = 5000;
@@ -51,6 +53,8 @@ export function useSessionRuntime(
   client: GatewayClient,
   sessionId: string | null,
   archived: boolean,
+  replyTo: string | null = null,
+  onReplySent?: () => void,
 ): UseSessionRuntimeResult {
   const storeRef = useRef<SessionStore | null>(null);
   if (!storeRef.current) storeRef.current = new SessionStore();
@@ -132,7 +136,30 @@ export function useSessionRuntime(
     return () => window.clearInterval(id);
   }, [state.typingTs]);
   const isTyping = state.typingTs > 0 && now - state.typingTs < TYPING_MS;
-  const isRunning = isTyping || hasRunningAssistant(state);
+  const isRunningRaw = isTyping || hasRunningAssistant(state);
+
+  // Keep isRunning sticky for a short window after each "raw" signal so that
+  // brief gaps (typing → message.edit finalize → next typing) don't flicker
+  // false→true repeatedly. Without this, assistant-ui re-emits thread.runStart
+  // on every flicker and the Viewport's autoScroll snaps the user back to the
+  // bottom on every chunk — breaking manual scroll-up during a stream.
+  const [stickyRunning, setStickyRunning] = useState(false);
+  useEffect(() => {
+    if (isRunningRaw) {
+      setStickyRunning(true);
+      return;
+    }
+    const id = window.setTimeout(() => setStickyRunning(false), 1500);
+    return () => window.clearTimeout(id);
+  }, [isRunningRaw]);
+  const runtimeRunning = stickyRunning;
+
+  const cancelRun = async () => {
+    if (!sessionId) return;
+    const streamId = store.getSnapshot().currentStreamId ?? "";
+    store.cancelActive(streamId);
+    await client.cancelStream(sessionId, streamId);
+  };
 
   // Adapter stays stable across re-renders; sessionId read via ref.
   const sidRef = useRef(sessionId);
@@ -145,7 +172,7 @@ export function useSessionRuntime(
   const runtime = useExternalStoreRuntime<OurMessage>({
     messages: state.messages,
     convertMessage,
-    isRunning,
+    isRunning: runtimeRunning,
     isDisabled: archived || !sessionId,
     isSendDisabled: conn.kind !== "connected",
     adapters: { attachments: attachmentAdapter },
@@ -157,21 +184,25 @@ export function useSessionRuntime(
         .join("");
       const attachments = (msg.attachments ?? [])
         .map((a) => a.id)
-        .filter((id): id is string => typeof id === "string" && !id.startsWith("err-"));
+        .filter((id): id is string => typeof id === "string" && !id.startsWith(ERR_ID_PREFIX));
       if (!text.trim() && attachments.length === 0) return;
-      const gen = client.sendMessage(sessionId, { text, attachments });
+      onReplySent?.();
+      const gen = client.sendMessage(sessionId, {
+        text,
+        attachments,
+        reply_to: replyTo ?? undefined,
+      });
       for await (const env of gen) {
         store.applyEvent(env);
         if (env.hash) setLastHash(sessionId, env.hash);
       }
     },
     onCancel: async () => {
-      const sid = store.getSnapshot().currentStreamId;
-      if (sessionId && sid) await client.cancelStream(sessionId, sid);
+      await cancelRun();
     },
   });
 
-  return { state, store, runtime, conn };
+  return { state, store, runtime, conn, isTyping };
 }
 
 export { AssistantRuntimeProvider };

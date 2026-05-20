@@ -26,8 +26,8 @@ declare global {
   interface Window {
     __HERMES_PLUGIN_SDK__?: HermesPluginSDK;
     __HERMES_PLUGINS__?: {
-      register: (name: string, component: any) => void;
-      registerSlot: (plugin: string, slot: string, component: any) => void;
+      register: (name: string, component: ReactNS.ComponentType) => void;
+      registerSlot: (plugin: string, slot: string, component: ReactNS.ComponentType) => void;
     };
     __HERMES_SESSION_TOKEN__?: string;
   }

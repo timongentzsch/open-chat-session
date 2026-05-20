@@ -2,6 +2,7 @@ import { React, useState, cn } from "@/sdk";
 import type { SessionInfo } from "@/types";
 import { actionButton, fieldBase, iconButton, panelTitle } from "@/ui";
 import { RELATIVE_TIME_BUCKETS } from "@/constants";
+import { SURFACE_CSS } from "@/chat-styles";
 
 // Host SDK's `timeAgo` returns "just now" for every timestamp regardless of
 // age (verified empirically). Local fallback until that's fixed upstream.
@@ -24,6 +25,10 @@ export interface SessionSidebarProps {
   onCreate: (name?: string) => void;
   loading?: boolean;
   error?: string | null;
+  /** Open state for the mobile drawer (ignored at md+). */
+  mobileOpen?: boolean;
+  /** Called when the user dismisses the mobile drawer. */
+  onClose?: () => void;
 }
 
 export function SessionSidebar({
@@ -33,34 +38,58 @@ export function SessionSidebar({
   onCreate,
   loading,
   error,
+  mobileOpen = false,
+  onClose,
 }: SessionSidebarProps) {
   const [creating, setCreating] = useState(false);
   const [newName, setNewName] = useState("");
 
   return (
     <aside
+      data-aui-ocs-panel="sessions"
+      data-aui-ocs-sidebar
+      data-aui-ocs-surface="dim"
+      data-open={mobileOpen ? "true" : "false"}
+      id="ocs-session-sidebar"
+      aria-label="Sessions"
       className={cn(
-        "flex w-64 shrink-0 flex-col gap-2 border-r border-midground/20 p-3",
+        "flex h-full w-64 shrink-0 flex-col gap-2 border-r border-midground/20 p-3",
       )}
-      style={{ background: "color-mix(in srgb, var(--foreground-base, #fff) 2%, transparent)" }}
     >
+      <style precedence="default">{SURFACE_CSS}</style>
       <div className={cn("flex h-9 items-center justify-between")}>
         <h2 className={cn(panelTitle)}>Sessions</h2>
-        <button
-          type="button"
-          className={cn(iconButton)}
-          onClick={() => setCreating((v: boolean) => !v)}
-          aria-label="New session"
-          title="New session"
-        >
-          +
-        </button>
+        <div className={cn("flex items-center gap-1")}>
+          <button
+            data-aui-ocs-control
+            type="button"
+            className={cn(iconButton)}
+            onClick={() => setCreating((v: boolean) => !v)}
+            aria-label="New session"
+            title="New session"
+          >
+            +
+          </button>
+          {onClose && (
+            <button
+              data-aui-ocs-control
+              data-aui-ocs-mobile-only
+              type="button"
+              className={cn(iconButton)}
+              onClick={onClose}
+              aria-label="Close sessions"
+              title="Close sessions"
+            >
+              ×
+            </button>
+          )}
+        </div>
       </div>
 
       {creating && (
         <form
           className={cn("flex items-center gap-1")}
-          onSubmit={(e: React.FormEvent) => {
+          onSubmit={(e) => {
             e.preventDefault();
             const name = newName.trim();
             onCreate(name || undefined);
@@ -73,9 +102,10 @@ export function SessionSidebar({
             className={cn(fieldBase, "h-8 flex-1 text-xs")}
             placeholder="session name (optional)"
             value={newName}
-            onChange={(e: React.ChangeEvent<HTMLInputElement>) => setNewName(e.target.value)}
+            onChange={(e) => setNewName(e.target.value)}
           />
           <button
+            data-aui-ocs-control
             type="submit"
             className={cn(actionButton, "h-8 border-foreground/40 px-2 text-foreground hover:bg-foreground/20")}
           >
@@ -85,7 +115,7 @@ export function SessionSidebar({
       )}
 
       {error && (
-        <div className={cn("rounded border border-rose-500/40 px-2 py-1 text-xs text-destructive")}>
+        <div className={cn("border border-destructive/40 px-2 py-1 text-xs text-destructive")}>
           {error}
         </div>
       )}
@@ -100,10 +130,11 @@ export function SessionSidebar({
           return (
             <li key={s.session_id}>
               <button
+                data-aui-ocs-session-row={active ? "active" : "idle"}
                 type="button"
                 onClick={() => onSelect(s.session_id)}
                 className={cn(
-                  "w-full rounded px-2 py-1.5 text-left text-xs",
+                  "w-full px-2 py-1.5 text-left text-xs",
                   active
                     ? "bg-foreground/20 text-foreground"
                     : "text-midground/80 hover:bg-foreground/2",

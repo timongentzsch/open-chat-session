@@ -4,7 +4,10 @@
   "description": "Multi-session SSE chat backed by the open-chat-session gateway.",
   "icon": "MessageSquare",
   "version": "0.3.0",
-  "tab": { "path": "/chat-session", "position": "after:chat" },
-  "entry": "dist/index.js?v=20260518eywe",
+  "tab": {
+    "path": "/chat-session",
+    "position": "after:chat"
+  },
+  "entry": "dist/index.js?v=a7b0996b5715",
   "api": "plugin_api.py"
 }

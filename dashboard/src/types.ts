@@ -25,18 +25,6 @@ export interface SessionInfo {
   event_count?: number;
 }
 
-export interface AttachmentInfo {
-  attachment_id: AttachmentId;
-  url: string;
-  mime: string;
-  size: number;
-  sha256: string;
-  filename?: string;
-  caption?: string;
-  uploaded_by?: Host;
-  uploaded_at?: UnixMs;
-}
-
 export interface AttachmentRef {
   attachment_id: AttachmentId;
   url: string;
@@ -47,6 +35,11 @@ export interface AttachmentRef {
   caption?: string;
 }
 
+export type AttachmentInfo = AttachmentRef & {
+  uploaded_by?: Host;
+  uploaded_at?: UnixMs;
+};
+
 export type GatewayEventKind =
   | "gateway.session.created"
   | "gateway.session.archived"
@@ -54,6 +47,7 @@ export type GatewayEventKind =
   | "gateway.message.in"
   | "gateway.message.out"
   | "gateway.message.edit"
+  | "gateway.message.cancel.requested"
   | "gateway.typing"
   | "gateway.image"
   | "gateway.video"
@@ -62,8 +56,12 @@ export type GatewayEventKind =
   | "gateway.voice"
   | "gateway.approval.request"
   | "gateway.approval.resolved"
+  | "gateway.clarify.request"
+  | "gateway.clarify.resolved"
   | "gateway.resync"
   | "gateway.error";
+
+export type ClarifyId = string;
 
 export interface EventEnvelope<P = unknown> {
   schema_version: "2026-05-15";
@@ -100,6 +98,11 @@ export interface MessageEditPayload {
   finalize: boolean;
 }
 
+export interface MessageCancelPayload {
+  by: Host;
+  stream_id: StreamId;
+}
+
 export interface ApprovalRequestPayload {
   tool_call_id: ToolCallId;
   tool_name: string;
@@ -115,6 +118,20 @@ export interface ApprovalResolvedPayload {
   decision: ApprovalDecision;
   resolved_by: Host;
   resolved_at: UnixMs;
+}
+
+export interface ClarifyRequestPayload {
+  clarify_id: ClarifyId;
+  session_key: string;
+  question: string;
+  choices: string[];
+  requested_at: UnixMs;
+}
+
+export interface ClarifyResolvedPayload {
+  clarify_id: ClarifyId;
+  response: string;
+  resolved_by: Host;
 }
 
 export interface TypingPayload {
@@ -134,11 +151,6 @@ export interface ResyncPayload {
 export type ApprovalDecision = "once" | "session" | "always" | "deny";
 
 export interface CreateSessionRequest {
-  name?: string;
-  metadata?: JsonObject;
-}
-
-export interface PatchSessionRequest {
   name?: string;
   metadata?: JsonObject;
 }
@@ -165,3 +177,57 @@ export interface HistoryResponse {
   events: EventEnvelope[];
   next_cursor?: Hash;
 }
+
+// --- Push delivery (Phase 4) ---
+
+export type PushPlatform =
+  | "web"
+  | "ios-home-screen"
+  | "macos-safari"
+  | "android-chrome";
+
+export interface PushSubscriptionJson {
+  endpoint: string;
+  expirationTime?: number | null;
+  keys: { p256dh: string; auth: string };
+}
+
+export interface PushNotificationPolicy {
+  message_in?: boolean;
+  message_out?: boolean;
+  approvals?: boolean;
+  preview_text?: boolean;
+  dedupe_ms?: number;
+  muted_session_ids?: SessionId[];
+}
+
+export interface RegisterPushDeviceRequest {
+  device_id: string;
+  platform: PushPlatform;
+  subscription: PushSubscriptionJson;
+  sessions?: SessionId[];
+  notification_policy?: PushNotificationPolicy;
+}
+
+export interface PushDevice {
+  device_id: string;
+  platform: PushPlatform;
+  endpoint_hash: string;
+  created_at: UnixMs;
+  updated_at: UnixMs;
+}
+
+export interface VapidPublicKeyResponse {
+  public_key: string;
+}
+
+export type GatewayEvent =
+  | { kind: "gateway.message.in"; payload: MessageInPayload }
+  | { kind: "gateway.message.out"; payload: MessageOutPayload }
+  | { kind: "gateway.message.edit"; payload: MessageEditPayload }
+  | { kind: "gateway.message.cancel.requested"; payload: MessageCancelPayload }
+  | { kind: "gateway.approval.request"; payload: ApprovalRequestPayload }
+  | { kind: "gateway.approval.resolved"; payload: ApprovalResolvedPayload }
+  | { kind: "gateway.clarify.request"; payload: ClarifyRequestPayload }
+  | { kind: "gateway.clarify.resolved"; payload: ClarifyResolvedPayload }
+  | { kind: "gateway.typing"; payload: TypingPayload };

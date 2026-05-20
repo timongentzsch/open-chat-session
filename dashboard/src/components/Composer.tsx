@@ -1,14 +1,17 @@
 import { React, cn } from "@/sdk";
 import {
   AttachmentPrimitive,
-  AuiIf,
   ComposerPrimitive,
-  type AssistantState,
+  unstable_useTriggerPopoverScopeContext,
   unstable_useSlashCommandAdapter,
   useAui,
 } from "@assistant-ui/react";
-import { actionButton, composerControlStyle, composerIconStyle, fieldBase, iconButton } from "@/ui";
-import { SLASH_ITEM_CSS, COMPOSER_CSS } from "@/chat-styles";
+import type { Unstable_TriggerItem } from "@assistant-ui/core";
+import { controlBase, fieldBase, iconButton } from "@/ui";
+import { SLASH_ITEM_CSS, COMPOSER_CSS, SURFACE_CSS } from "@/chat-styles";
+import type { OurMessage } from "@/runtime/session-store";
+import { PaperclipIcon, RemoveIcon, MicIcon, StopRecordIcon } from "@/components/icons";
+import { previewText } from "@/lib/preview";
 
 const SLASH_COMMANDS = [
   ["usage", "Show token usage and rate limits"],
@@ -29,43 +32,184 @@ const SLASH_COMMANDS = [
   ["background", "Run a background prompt"],
   ["steer", "Inject a follow-up without interrupting"],
   ["stop", "Stop the running response"],
+  ["voice", "Toggle voice replies — /voice on|tts|off|status"],
 ] as const;
 
-function PaperclipIcon() {
-  return (
-    <svg
-      width="14" height="14" viewBox="0 0 24 24" fill="none"
-      stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
-      aria-hidden="true"
-    >
-      <path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48" />
-    </svg>
-  );
+// Browsers expose different MediaRecorder codecs. Pick the first one that
+// works so we record a real container; if MediaRecorder.isTypeSupported
+// rejects all, the browser-default mime is used (still works, just opaque).
+function pickAudioMime(): { mime: string; ext: string } {
+  const candidates: Array<{ mime: string; ext: string }> = [
+    { mime: "audio/webm;codecs=opus", ext: "webm" },
+    { mime: "audio/ogg;codecs=opus", ext: "ogg" },
+    { mime: "audio/mp4", ext: "m4a" },
+    { mime: "audio/mpeg", ext: "mp3" },
+  ];
+  for (const c of candidates) {
+    if (typeof MediaRecorder !== "undefined" && MediaRecorder.isTypeSupported(c.mime)) {
+      return c;
+    }
+  }
+  return { mime: "", ext: "webm" };
 }
 
-function RemoveIcon() {
+function formatElapsed(ms: number): string {
+  const s = Math.floor(ms / 1000);
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+}
+
+const ELAPSED_TICK_MS = 250;
+const ERROR_TIMEOUT_MS = 4000;
+const CHUNK_INTERVAL_MS = 250;
+
+function VoiceRecordButton() {
+  const aui = useAui();
+  const [recording, setRecording] = React.useState(false);
+  const [elapsed, setElapsed] = React.useState(0);
+  const [error, setError] = React.useState<string | null>(null);
+  const recorderRef = React.useRef<MediaRecorder | null>(null);
+  const streamRef = React.useRef<MediaStream | null>(null);
+  const chunksRef = React.useRef<Blob[]>([]);
+  const startTsRef = React.useRef<number>(0);
+
+  React.useEffect(() => {
+    if (!recording) return;
+    const id = window.setInterval(() => {
+      setElapsed(Date.now() - startTsRef.current);
+    }, ELAPSED_TICK_MS);
+    return () => window.clearInterval(id);
+  }, [recording]);
+
+  // Hide a transient error after a few seconds.
+  React.useEffect(() => {
+    if (!error) return;
+    const id = window.setTimeout(() => setError(null), ERROR_TIMEOUT_MS);
+    return () => window.clearTimeout(id);
+  }, [error]);
+
+  const cleanup = React.useCallback(() => {
+    streamRef.current?.getTracks().forEach((t) => t.stop());
+    streamRef.current = null;
+    recorderRef.current = null;
+    chunksRef.current = [];
+  }, []);
+
+  const start = React.useCallback(async () => {
+    setError(null);
+    if (typeof navigator === "undefined" || !navigator.mediaDevices?.getUserMedia) {
+      setError("recording not supported");
+      return;
+    }
+    let stream: MediaStream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch {
+      setError("mic permission denied");
+      return;
+    }
+    const { mime, ext } = pickAudioMime();
+    let rec: MediaRecorder;
+    try {
+      rec = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
+    } catch (exc) {
+      stream.getTracks().forEach((t) => t.stop());
+      setError(exc instanceof Error ? exc.message : "recorder init failed");
+      return;
+    }
+    chunksRef.current = [];
+    rec.ondataavailable = (e) => {
+      if (e.data && e.data.size > 0) chunksRef.current.push(e.data);
+    };
+    rec.onerror = (e: ErrorEvent) => {
+      setError(e.error?.message ?? e.message ?? "recorder error");
+    };
+    rec.onstop = async () => {
+      const recordedMime = rec.mimeType || mime || "audio/webm";
+      const blob = new Blob(chunksRef.current, { type: recordedMime });
+      cleanup();
+      if (blob.size === 0) {
+        setError("recording was empty");
+        return;
+      }
+      const file = new File([blob], `voice-${Date.now()}.${ext}`, { type: recordedMime });
+      try {
+        await aui.composer().addAttachment(file);
+      } catch (exc) {
+        setError(exc instanceof Error ? exc.message : "upload failed");
+      }
+    };
+    streamRef.current = stream;
+    recorderRef.current = rec;
+    startTsRef.current = Date.now();
+    setElapsed(0);
+    setRecording(true);
+    // Flush a chunk every CHUNK_INTERVAL_MS so we still have data even on very short clips.
+    rec.start(CHUNK_INTERVAL_MS);
+  }, [aui, cleanup]);
+
+  const stop = React.useCallback(() => {
+    const rec = recorderRef.current;
+    setRecording(false);
+    if (!rec || rec.state === "inactive") {
+      cleanup();
+      return;
+    }
+    try {
+      rec.requestData();
+    } catch {
+      // Some browsers throw if state is not "recording" — onstop still fires.
+    }
+    rec.stop();
+  }, [cleanup]);
+
+  React.useEffect(() => () => cleanup(), [cleanup]);
+
+  if (recording) {
+    return (
+      <button
+        data-aui-ocs-control
+        type="button"
+        onClick={stop}
+        aria-label="stop recording"
+        title={`stop · ${formatElapsed(elapsed)}`}
+        className={cn(
+          controlBase,
+          "shrink-0 gap-1.5 px-2.5 border-destructive/50 text-destructive hover:bg-destructive/10",
+        )}
+      >
+        <StopRecordIcon />
+        <span className="font-mondwest text-[10px] tracking-[0.06em]">
+          {formatElapsed(elapsed)}
+        </span>
+      </button>
+    );
+  }
   return (
-    <svg
-      width="12" height="12" viewBox="0 0 24 24" fill="none"
-      stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
-      aria-hidden="true"
+    <button
+      data-aui-ocs-control
+      type="button"
+      onClick={start}
+      aria-label="record audio"
+      title={error ?? "record audio"}
+      className={cn(iconButton, "shrink-0", error && "border-destructive/40 text-destructive")}
     >
-      <path d="M18 6 6 18" />
-      <path d="m6 6 12 12" />
-    </svg>
+      <MicIcon />
+    </button>
   );
 }
 
 function ComposerAttachment() {
   return (
     <AttachmentPrimitive.Root
-      className="inline-flex h-8 max-w-[14rem] items-center gap-2 rounded border border-midground/35 px-2 text-[11px] text-foreground"
-      style={{ background: "color-mix(in srgb, var(--foreground-base, #fff) 4%, transparent)" }}
+      data-aui-ocs-composer-attachment
+      data-aui-ocs-surface="mid"
+      className="inline-flex h-8 max-w-[14rem] items-center gap-2 border border-midground/35 px-2 text-[11px] text-foreground"
     >
-      <AttachmentPrimitive.unstable_Thumb className="flex h-5 min-w-6 items-center justify-center rounded border border-midground/25 px-1 font-mondwest text-[9px] text-midground/70" />
+      <AttachmentPrimitive.unstable_Thumb className="flex h-5 min-w-6 items-center justify-center border border-midground/25 px-1 font-mondwest text-[9px] text-midground/70" />
       <AttachmentPrimitive.Name />
       <AttachmentPrimitive.Remove
-        className="ml-auto flex h-5 w-5 shrink-0 items-center justify-center rounded border border-midground/25 text-midground/70 hover:text-foreground"
+        data-aui-ocs-control
+        className="ml-auto flex h-5 w-5 shrink-0 items-center justify-center border border-midground/25 text-midground/70 hover:text-foreground"
         aria-label="remove attachment"
       >
         <RemoveIcon />
@@ -75,6 +219,19 @@ function ComposerAttachment() {
 }
 
 
+function commitSlashCommand(aui: ReturnType<typeof useAui>, id: string) {
+  const text = `/${id} `;
+  aui.composer().setText(text);
+  requestAnimationFrame(() => {
+    const input = document.querySelector<HTMLTextAreaElement>("[data-aui-ocs-composer] textarea");
+    if (!input) return;
+    input.focus({ preventScroll: true });
+    input.setSelectionRange(text.length, text.length);
+    // notify trigger detection that cursor moved past the inserted command
+    input.dispatchEvent(new Event("select", { bubbles: true }));
+  });
+}
+
 function SlashCommands() {
   const aui = useAui();
   const slash = unstable_useSlashCommandAdapter({
@@ -83,7 +240,7 @@ function SlashCommands() {
       id,
       label: `/${id}`,
       description,
-      execute: () => aui.composer().setText(`/${id}`),
+      execute: () => commitSlashCommand(aui, id),
     })),
   });
 
@@ -91,33 +248,20 @@ function SlashCommands() {
     <ComposerPrimitive.Unstable_TriggerPopover
       char="/"
       adapter={slash.adapter}
-      className="absolute bottom-full left-12 right-20 z-20 mb-2 max-h-72 overflow-hidden rounded-md border border-midground/30 bg-background p-1 shadow-xl"
+      className="absolute z-20 flex flex-col overflow-hidden border border-midground/30 bg-background p-1 shadow-xl"
+      data-aui-ocs-slash-popover
     >
       <style precedence="default">{SLASH_ITEM_CSS}</style>
       <ComposerPrimitive.Unstable_TriggerPopover.Action {...slash.action} />
       <ComposerPrimitive.Unstable_TriggerPopoverItems>
         {(items) => (
-          <div className="max-h-64 overflow-y-auto">
+          <div data-aui-ocs-slash-items className="flex-1">
             {items.map((item, index) => (
-              <ComposerPrimitive.Unstable_TriggerPopoverItem
+              <SlashCommandItem
                 key={item.id}
                 item={item}
                 index={index}
-                data-aui-ocs-slash-item
-                className="flex w-full items-start gap-3 rounded px-2.5 py-2 text-left text-sm text-foreground"
-              >
-                <span className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded border border-midground/25 font-mondwest text-[11px] text-midground">
-                  /
-                </span>
-                <span className="min-w-0">
-                  <span className="block font-medium">{item.label}</span>
-                  {item.description && (
-                    <span className="block truncate text-xs text-midground/70">
-                      {item.description}
-                    </span>
-                  )}
-                </span>
-              </ComposerPrimitive.Unstable_TriggerPopoverItem>
+              />
             ))}
           </div>
         )}
@@ -126,62 +270,106 @@ function SlashCommands() {
   );
 }
 
-export function Composer({ placeholder }: { placeholder?: string }) {
+function SlashCommandItem({ item, index }: { item: Unstable_TriggerItem; index: number }) {
+  const ref = React.useRef<HTMLButtonElement | null>(null);
+  const { highlightedIndex } = unstable_useTriggerPopoverScopeContext();
+  const isHighlighted = highlightedIndex === index;
+
+  React.useEffect(() => {
+    if (!isHighlighted) return;
+    ref.current?.scrollIntoView({ block: "nearest" });
+  }, [isHighlighted]);
+
+  return (
+    <ComposerPrimitive.Unstable_TriggerPopoverItem
+      ref={ref}
+      type="button"
+      item={item}
+      index={index}
+      data-aui-ocs-slash-item
+      className="flex w-full items-start gap-3 px-2.5 py-2 text-left text-sm text-foreground"
+    >
+      <span className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center border border-midground/25 font-mondwest text-[11px] text-midground">
+        /
+      </span>
+      <span className="min-w-0">
+        <span className="block font-medium">{item.label}</span>
+        {item.description && (
+          <span className="block truncate text-xs text-midground/70">
+            {item.description}
+          </span>
+        )}
+      </span>
+    </ComposerPrimitive.Unstable_TriggerPopoverItem>
+  );
+}
+
+export interface ComposerProps {
+  placeholder?: string;
+  replyTarget?: OurMessage;
+  onCancelReply?: () => void;
+}
+
+export function Composer({
+  placeholder,
+  replyTarget,
+  onCancelReply,
+}: ComposerProps) {
   return (
     <ComposerPrimitive.AttachmentDropzone
       data-aui-ocs-composer
     >
       <style precedence="default">{COMPOSER_CSS}</style>
-      <ComposerPrimitive.Root className="relative flex flex-col gap-1.5 px-3 py-2">
-        <ComposerPrimitive.Unstable_TriggerPopoverRoot>
+      <style precedence="default">{SURFACE_CSS}</style>
+      <ComposerPrimitive.Unstable_TriggerPopoverRoot>
+        <ComposerPrimitive.Root className="relative flex flex-col gap-1.5 px-3 py-2">
+          {replyTarget && (
+            <div className="flex h-8 items-center gap-2 border border-midground/25 px-2 text-xs text-midground/80">
+              <span className="shrink-0 font-mondwest uppercase tracking-[0.1em]">
+                reply to {replyTarget.role}
+              </span>
+              <span className="min-w-0 flex-1 truncate text-foreground/80">
+                {previewText(replyTarget.content)}
+              </span>
+              <button
+                data-aui-ocs-control
+                type="button"
+                className="flex h-5 w-5 shrink-0 items-center justify-center border border-midground/25 text-midground/70 hover:text-foreground"
+                onClick={onCancelReply}
+                aria-label="cancel reply"
+                title="cancel reply"
+              >
+                <RemoveIcon />
+              </button>
+            </div>
+          )}
           <ComposerPrimitive.Attachments>
             {() => <ComposerAttachment />}
           </ComposerPrimitive.Attachments>
-          <div className={cn("flex items-end gap-2")}>
+          <div data-aui-ocs-composer-row className={cn("flex items-end gap-2")}>
             <ComposerPrimitive.AddAttachment
+              data-aui-ocs-control
               className={cn(iconButton, "shrink-0")}
-              style={composerIconStyle}
               aria-label="attach file"
               title="attach file"
             >
               <PaperclipIcon />
             </ComposerPrimitive.AddAttachment>
+            <VoiceRecordButton />
             <ComposerPrimitive.Input
+              data-aui-ocs-field
               rows={1}
+              enterKeyHint="send"
               placeholder={placeholder ?? "Message…"}
               className={cn(
                 fieldBase,
-                "max-h-40 min-h-9 flex-1 resize-none py-2",
+                "max-h-40 flex-1 resize-none",
               )}
-              style={composerControlStyle}
             />
-            <AuiIf condition={(s: AssistantState) => s.thread.isRunning}>
-              <ComposerPrimitive.Cancel
-                className={cn(
-                  actionButton,
-                  "shrink-0 border-rose-500/40 text-destructive hover:bg-destructive/10",
-                )}
-                style={composerControlStyle}
-              >
-                stop
-              </ComposerPrimitive.Cancel>
-            </AuiIf>
-            <AuiIf condition={(s: AssistantState) => !s.thread.isRunning}>
-              <ComposerPrimitive.Send
-                className={cn(
-                  actionButton,
-                  "shrink-0 border-emerald-500/40 text-success",
-                  "hover:bg-success/10 disabled:opacity-40 disabled:hover:bg-transparent",
-                )}
-                style={composerControlStyle}
-              >
-                send
-              </ComposerPrimitive.Send>
-            </AuiIf>
           </div>
           <SlashCommands />
-        </ComposerPrimitive.Unstable_TriggerPopoverRoot>
-      </ComposerPrimitive.Root>
+        </ComposerPrimitive.Root>
+      </ComposerPrimitive.Unstable_TriggerPopoverRoot>
     </ComposerPrimitive.AttachmentDropzone>
   );
 }
