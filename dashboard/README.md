@@ -1,28 +1,24 @@
-# Dashboard plugin
+# Dashboard Plugin
 
-First-party graphical chat for the gateway, mounted inside the existing `hermes dashboard` via the plugin extension system. Adds `/chat-session`; leaves built-in `/chat` untouched.
+Reference web client for the `open_chat_session` protocol, mounted at
+`/chat-session` inside `hermes dashboard`. The open chat protocol is the primary
+surface; this dashboard is one plugin-contained implementation and leaves stock
+`/chat` untouched.
 
-Storage schema (event log + attachments) is documented in the root README.
+## Pieces
 
-```
-~/.hermes/plugins/open_chat_session/
-dashboard/
-  manifest.json         - discovery manifest
-  plugin_api.py         - authenticated reverse proxy to :8765
-  src/                  - Vite IIFE using the Hermes Plugin SDK
-    index.tsx           - entry; calls register("open-chat-session", ChatPage)
-    sdk.ts              - typed view onto window.__HERMES_PLUGIN_SDK__
-    types.ts            - client API types
-    errors.ts           - GatewayError
-    parse-sse.ts        - SSE parser
-    gateway-client.ts   - REST + SSE client
-    runtime/            - session store + assistant-ui runtime
-    hooks/              - session list, stream subscription, resume param
-    components/         - ChatThread.tsx, MarkdownText.tsx, Composer.tsx,
-                          ApprovalPanel.tsx, AttachmentChip.tsx,
-                          SessionSidebar.tsx, StatusBanners.tsx
-    pages/ChatPage.tsx
-  dist/                 - Vite output, shipped in-tree
+```text
+manifest.json          # dashboard plugin metadata, entry hash managed by build
+plugin_api.py          # dashboard-side proxy to http://127.0.0.1:8765
+public/                # sw.js, web manifest, icons
+src/index.tsx          # register("open-chat-session", ChatPage)
+src/sdk.ts             # typed window.__HERMES_PLUGIN_SDK__ access
+src/gateway-client.ts  # REST + SSE client
+src/runtime/           # event store + assistant-ui runtime bridge
+src/components/        # thread, composer, sidebar, attachments, banners, push
+src/chat-styles.ts     # scoped CSS using Hermes dashboard tokens
+dist/                  # committed Vite output
+scripts/               # build helpers
 ```
 
 ## Build
@@ -33,48 +29,37 @@ npm install
 npm run build
 ```
 
-Rebuilds are picked up by the dashboard's static file server live (ETag-validated). The browser may need a hard reload to bypass cache.
+The build runs Vite and `scripts/update-entry-hash.mjs`. The script hashes
+`dist/index.js` and rewrites `manifest.json` only when the entry URL changes,
+so cache busting is automatic.
 
-`plugin_api.py` changes require a dashboard restart:
+## Runtime Path
 
-```sh
-hermes dashboard --stop
-hermes dashboard --no-open --skip-build
+```text
+Browser
+  -> plugin edge :9120 when published through Tailscale
+  -> hermes dashboard :9119
+  -> plugin_api.py
+  -> open_chat_session gateway :8765
 ```
 
-## Reverse proxy & auth
+`plugin_api.py` strips browser-supplied auth headers, injects the dashboard
+bearer token, injects a stable `X-Device-Id`, and streams SSE without buffering.
 
-```
-Browser --HTTPS--> Dashboard --in-process--> plugin_api.py --HTTP localhost:8765--> gateway
-            X-Hermes-Session-Token             Authorization: Bearer <API_SERVER_KEY>
-                                              X-Device-Id: dashboard-<uuid>
-```
+## Mobile And Push
 
-`plugin_api.py`:
+- PWA files are served by the plugin edge from `/dashboard-plugins/...`.
+- `src/push/inject-pwa.ts` injects manifest, Apple icon, viewport, and iOS
+  standalone metadata.
+- Inputs are 16px on mobile to avoid iOS focus zoom.
+- The composer has no visible send/stop button; Enter submits and assistant-ui
+  still exposes cancellation through its runtime hook.
+- Push notifications show message previews by default and are suppressed when
+  the session is already open for the same gateway user on any dashboard device.
 
-- **Strips** browser-supplied `Authorization` and `X-Device-Id` before forwarding.
-- **Injects** `Authorization: Bearer <API_SERVER_KEY>`, resolved from `os.getenv`, `~/.hermes/.env`, or `~/.hermes/config.yaml`.
-- **Injects** a stable `X-Device-Id` persisted at `dashboard/.device-id` so the gateway's per-device resume state survives dashboard restarts.
-- **Streams SSE** end-to-end via `httpx.AsyncClient.stream(...)` and FastAPI `StreamingResponse`.
+## Notes
 
-The proxy targets `http://127.0.0.1:8765`; the gateway's `bind` config must keep a localhost-reachable interface listening (default `0.0.0.0:8765` satisfies this).
-
-`adapter.py::register(ctx)` passes `is_connected=is_platform_connected` so the plugin surfaces in the dashboard's `/sessions > Connected Platforms` panel.
-
-## Resume semantics — `/chat-session?resume=<id>`
-
-| Input | Behaviour |
-|---|---|
-| native gateway session id (e.g. `s_...`) | select that session |
-| any other id | show fallback banner; user picks from the sidebar or opens the id in `hermes --tui` |
-| no `?resume=` | restore last-selected (localStorage) or first session |
-
-URL is updated via `history.replaceState` so links stay shareable.
-
-## Uninstall
-
-Remove `dashboard/manifest.json` (or the whole `dashboard/` directory), then `GET /api/dashboard/plugins/rescan`.
-
-## Web Push (not implemented)
-
-Web Push requires PWA scaffolding (root web manifest, root-scoped service worker, stable HTTPS origin, VAPID key surfacing) that the dashboard host does not currently provide. The plugin cannot supply root-scoped assets from `/api/plugins/*`.
+Slash commands use assistant-ui trigger popover primitives with an internal
+scroll area. The UI should inherit Hermes dashboard tokens (`background`,
+`foreground-base`, `midground`, `success`, `warning`, `destructive`) instead of
+hard-coded palette colors.
