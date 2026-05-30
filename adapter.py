@@ -54,6 +54,11 @@ DEFAULT_EDGE_DASHBOARD_URL = "http://127.0.0.1:9119"
 DEFAULT_MAX_ATTACHMENT_SIZE = 100 * 1024 * 1024  # 100 MB
 APPROVAL_TIMEOUT_S = 300
 APPROVAL_CHOICES = ("once", "session", "always", "deny")
+# How long a resolved `tailscale whois` lookup is reused before re-spawning the
+# subprocess for the same peer.
+WHOIS_CACHE_TTL_S = 5.0
+# Page size for paginated log scans (see HashChainedLog.iter_after).
+LOG_PAGE_LIMIT = 1000
 PUSH_PLATFORMS = ("web", "ios-home-screen", "macos-safari", "android-chrome")
 PLUGIN_DASHBOARD_NAME = "open-chat-session"
 PLUGIN_DASHBOARD_ROUTE = f"/dashboard-plugins/{PLUGIN_DASHBOARD_NAME}/"
@@ -61,6 +66,11 @@ PLUGIN_DASHBOARD_ROUTE = f"/dashboard-plugins/{PLUGIN_DASHBOARD_NAME}/"
 PUSH_BODY_MAX_CHARS = 140
 # Per-(user, session) throttle window; approvals bypass this.
 PUSH_DEFAULT_DEDUPE_MS = 5000
+# Bound the in-memory push dedupe map. Once it exceeds the threshold, entries
+# older than the retention window are evicted; retention sits well above any
+# per-device dedupe_ms so an evicted entry could never have produced a hit.
+PUSH_LAST_PUSH_SWEEP_THRESHOLD = 256
+PUSH_LAST_PUSH_RETENTION_MS = 3_600_000  # 1 hour
 # VAPID `sub` contact. Apple Push Service rejects mailto: addresses whose
 # TLD isn't deliverable (.local, .localhost, .invalid, .test, .example) with
 # `403 BadJwtToken`, silently breaking Safari/iOS subscribers. FCM and Mozilla
@@ -113,6 +123,40 @@ _TRUTHY = ("1", "true", "yes", "on")
 _CURRENT_STREAM_ID: "contextvars.ContextVar[str | None]" = contextvars.ContextVar(
     "open_chat_session_stream_id", default=None,
 )
+
+# Wire-format version sent in `/health` and stamped on every EventEnvelope.
+# Bump only on a breaking change to the client API (per 07-client-api.md).
+GATEWAY_API_VERSION = "2026-05-15"
+
+# Header names. Spec'd in 07-client-api.md "Headers".
+HEADER_DEVICE_ID = "X-Device-Id"
+HEADER_AUTHORIZATION = "Authorization"
+HEADER_LAST_EVENT_ID = "Last-Event-ID"
+# Dashboard proxy hands the per-browser stable device id through this header
+# so the adapter can suppress pushes for the device viewing the session even
+# though every dashboard request shares the proxy-injected X-Device-Id.
+HEADER_DEVICE_ID_OVERRIDE = "X-Open-Chat-Session-Device-Id"
+
+
+def _redact_identity(identity: str | None) -> str:
+    """Mask a caller identity for log lines.
+
+    Required by 03-interfaces.md "Log Hygiene": `Authorization` bearer tokens,
+    `X-Device-Id` values, and `tailscale whois` logins must not appear in
+    cleartext in any log line. We keep enough signal (`bearer:` vs `ts:`
+    prefix + 8 hex chars of sha256) to correlate sessions across a debug
+    session without leaking the raw value.
+    """
+    if not identity:
+        return ""
+    if identity.startswith("bearer:"):
+        raw = identity[len("bearer:"):]
+        digest = hashlib.sha256(raw.encode("utf-8", errors="replace")).hexdigest()[:8]
+        return f"bearer:{digest}"
+    if identity.startswith(("system:", "agent")):
+        return identity
+    digest = hashlib.sha256(identity.encode("utf-8", errors="replace")).hexdigest()[:8]
+    return f"ts:{digest}"
 
 
 def _now_ms() -> int:
@@ -167,7 +211,7 @@ def _resolve_local_ref(ref: str) -> str | None:
     if ref.startswith(("http://", "https://", "data:", "/sessions/")):
         return None
     if ref.startswith("file://"):
-        from urllib.parse import unquote, urlparse
+        from urllib.parse import urlparse
         parsed = urlparse(ref)
         path = unquote(parsed.path or "")
         return path if path else None
@@ -260,6 +304,8 @@ class SessionInfo:
     created_at: int
     archived: bool = False
     parent_session_id: str | None = None
+    archived_at: int | None = None
+    archived_by: str | None = None
 
     def to_dict(self) -> dict:
         return dataclasses.asdict(self)
@@ -363,15 +409,21 @@ class HashChainedLog:
 
             event = {**event_for_hash, "hash": h}
             for q in list(self._subs[session_id]):
-                with contextlib.suppress(asyncio.QueueFull):
+                try:
                     q.put_nowait(event)
+                except asyncio.QueueFull:
+                    # Flag overflow so _stream_sse drops the connection and the
+                    # client resumes by Last-Event-ID (02-protocol.md).
+                    q._ocs_overflowed = True
             for q in list(self._global_subs):
+                # Push firehose has no client to resume, so stay lossy.
                 with contextlib.suppress(asyncio.QueueFull):
                     q.put_nowait(event)
             return event
 
     def subscribe(self, session_id: str) -> asyncio.Queue:
         q: asyncio.Queue = asyncio.Queue(maxsize=512)
+        q._ocs_overflowed = False
         self._subs[session_id].append(q)
         return q
 
@@ -411,7 +463,7 @@ class HashChainedLog:
         return row[0] if row else None
 
     def range_after(self, session_id: str, after_seq: int,
-                    limit: int = 1000) -> list[dict]:
+                    limit: int = LOG_PAGE_LIMIT) -> list[dict]:
         cur = self._db.execute(
             "SELECT seq, prev_hash, hash, stream_id, kind, data, ts "
             "FROM events WHERE session_id=? AND seq > ? "
@@ -419,6 +471,19 @@ class HashChainedLog:
             (session_id, after_seq, limit),
         )
         return [self._row_to_event(session_id, r) for r in cur]
+
+    def iter_after(self, session_id: str, after_seq: int = 0):
+        """Yield every event after ``after_seq`` in seq order, paging internally
+        so callers are not truncated at the range_after page limit."""
+        cursor = after_seq
+        while True:
+            batch = self.range_after(session_id, cursor, limit=LOG_PAGE_LIMIT)
+            if not batch:
+                return
+            yield from batch
+            if len(batch) < LOG_PAGE_LIMIT:
+                return
+            cursor = batch[-1]["seq"]
 
     def last_n(self, session_id: str, n: int) -> list[dict]:
         cur = self._db.execute(
@@ -462,9 +527,10 @@ class SessionRegistry:
 
     def load_from_log(self):
         for sid in self._log.known_sessions():
-            events = self._log.range_after(sid, 0)
+            # Page the full history so a late archive/rename past LOG_PAGE_LIMIT
+            # is not missed on restart.
             info: SessionInfo | None = None
-            for ev in events:
+            for ev in self._log.iter_after(sid, 0):
                 if ev["kind"] == EventKind.SESSION_CREATED:
                     d = ev["data"]
                     info = SessionInfo(
@@ -478,6 +544,8 @@ class SessionRegistry:
                     )
                 elif info and ev["kind"] == EventKind.SESSION_ARCHIVED:
                     info.archived = True
+                    info.archived_at = ev["ts"]
+                    info.archived_by = (ev["data"] or {}).get("by")
                 elif info and ev["kind"] == EventKind.SESSION_METADATA:
                     patch = ev["data"].get("patch", {}) or {}
                     if "name" in patch:
@@ -522,17 +590,24 @@ class SessionRegistry:
             },
         )
         self._sessions[sid] = info
-        logger.info("session created sid=%s name=%s by=%s", sid, info.name, created_by)
+        logger.info(
+            "session created sid=%s name=%s by=%s",
+            sid, info.name, _redact_identity(created_by),
+        )
         return info
 
     async def archive(self, session_id: str, by: str):
         if session_id not in self._sessions:
             raise KeyError(session_id)
+        ts = _now_ms()
         await self._log.append(
             session_id, EventKind.SESSION_ARCHIVED, session_id, {"by": by},
         )
-        self._sessions[session_id].archived = True
-        logger.info("session archived sid=%s by=%s", session_id, by)
+        info = self._sessions[session_id]
+        info.archived = True
+        info.archived_at = ts
+        info.archived_by = by
+        logger.info("session archived sid=%s by=%s", session_id, _redact_identity(by))
 
     async def rename(self, session_id: str, name: str, by: str):
         if session_id not in self._sessions:
@@ -692,7 +767,7 @@ class AttachmentStore:
 
 
 # ---------------------------------------------------------------------------
-# Push Delivery (Phase 4)
+# Push Delivery
 # ---------------------------------------------------------------------------
 
 
@@ -749,7 +824,12 @@ class VapidKey:
         else:
             self._vapid = Vapid()
             self._vapid.generate_keys()
-            # save_key writes PEM; tighten perms afterwards.
+            # Pre-create 0600 so save_key's truncating write never leaves the
+            # key briefly world-readable; post-write chmod is belt-and-braces.
+            with contextlib.suppress(OSError):
+                os.close(os.open(
+                    self._path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600,
+                ))
             self._vapid.save_key(str(self._path))
             with contextlib.suppress(OSError):
                 os.chmod(self._path, 0o600)
@@ -764,8 +844,10 @@ class VapidKey:
         return self._public_b64
 
     @property
-    def private_pem_path(self) -> Path:
-        return self._path
+    def instance(self):
+        """Parsed Vapid keypair, reused so pywebpush doesn't re-parse the PEM
+        on every send."""
+        return self._vapid
 
 
 class PushStore:
@@ -905,15 +987,6 @@ class PushStore:
         )
         return [self._row_to_device(r) for r in cur]
 
-    def for_user(self, user_id: str) -> list[PushDevice]:
-        cur = self._db.execute(
-            "SELECT device_id, user_id, endpoint_hash, platform, "
-            "subscription, policy, sessions, created_at, updated_at "
-            "FROM push_devices WHERE user_id=?",
-            (user_id,),
-        )
-        return [self._row_to_device(r) for r in cur]
-
     async def prune_endpoint(self, endpoint_hash: str) -> None:
         async with self._lock:
             self._db.execute(
@@ -950,14 +1023,14 @@ class PushDispatcher:
         *,
         log: HashChainedLog,
         store: PushStore,
-        vapid_key_path: Path,
+        vapid,
         vapid_subject: str,
         session_registry: SessionRegistry,
         active_views: dict[tuple[str, str, str], int],
     ) -> None:
         self._log = log
         self._store = store
-        self._vapid_key_path = vapid_key_path
+        self._vapid = vapid
         self._vapid_subject = vapid_subject
         self._sessions = session_registry
         self._active_views = active_views
@@ -1071,6 +1144,13 @@ class PushDispatcher:
 
     async def _dispatch(self, event: dict) -> None:
         sid = event["session_id"]
+        now = event["ts"]
+        # Bound the dedupe map (entries past the retention window can't hit).
+        if len(self._last_push) > PUSH_LAST_PUSH_SWEEP_THRESHOLD:
+            cutoff = now - PUSH_LAST_PUSH_RETENTION_MS
+            self._last_push = {
+                k: ts for k, ts in self._last_push.items() if ts >= cutoff
+            }
         if event["kind"] == EventKind.MESSAGE_IN:
             if author := (event.get("data") or {}).get("author"):
                 self._unread.pop(author, None)
@@ -1079,26 +1159,36 @@ class PushDispatcher:
             self._unread.pop(uid, None)
         if not targets:
             return
+        # app_badge is per-user: one proposed count per user, reused across that
+        # user's devices (per-device increment would inflate it to N).
+        proposed: dict[str, int] = {}
         for device, title, body in targets:
-            proposed_count = self._unread.get(device.user_id, 0) + 1
+            uid = device.user_id
+            if uid not in proposed:
+                proposed[uid] = self._unread.get(uid, 0) + 1
+            proposed_count = proposed[uid]
             payload = self._build_payload(
                 title=title, body=body, session_id=sid,
                 app_badge=str(proposed_count),
             )
-            self._last_push[(device.user_id, sid)] = event["ts"]
+            self._last_push[(uid, sid)] = now
             try:
                 await asyncio.to_thread(self._send_one, device, payload)
-                self._unread[device.user_id] = proposed_count
-                logger.debug("push sent device=%s sid=%s", device.device_id, sid)
+                self._unread[uid] = proposed_count
+                logger.debug(
+                    "push sent device=%s sid=%s",
+                    _redact_identity(device.device_id), sid,
+                )
             except _PushGone as exc:
                 logger.info(
                     "pruning push device %s (endpoint gone: %s)",
-                    device.device_id, exc,
+                    _redact_identity(device.device_id), exc,
                 )
                 await self._store.prune_endpoint(device.endpoint_hash)
             except Exception:
                 logger.exception(
-                    "push send failed for device %s", device.device_id,
+                    "push send failed for device %s",
+                    _redact_identity(device.device_id),
                 )
 
     def _send_one(self, device: PushDevice, payload: bytes) -> None:
@@ -1108,7 +1198,8 @@ class PushDispatcher:
             webpush(
                 subscription_info=device.subscription,
                 data=payload,
-                vapid_private_key=str(self._vapid_key_path),
+                # Parsed instance: pywebpush reuses it instead of re-parsing PEM.
+                vapid_private_key=self._vapid,
                 vapid_claims={"sub": self._vapid_subject},
                 content_encoding="aes128gcm",
                 ttl=300,
@@ -1290,10 +1381,19 @@ class TailnetEdge:
                     reason=upstream.reason_phrase,
                     headers=headers,
                 )
+                # Once prepare() flushes headers a fresh 502 is impossible, so a
+                # mid-stream failure logs and aborts; only a pre-prepare failure
+                # becomes HTTPBadGateway (outer except).
                 await response.prepare(request)
-                async for chunk in upstream.aiter_raw():
-                    await response.write(chunk)
-                await response.write_eof()
+                try:
+                    async for chunk in upstream.aiter_raw():
+                        await response.write(chunk)
+                    await response.write_eof()
+                except Exception as exc:
+                    logger.warning(
+                        "tailnet edge dashboard proxy aborted mid-stream: %s",
+                        exc,
+                    )
                 return response
         except Exception as exc:
             logger.warning("tailnet edge dashboard proxy failed: %s", exc)
@@ -1366,8 +1466,11 @@ def _sse_simple(event: str, data: dict) -> bytes:
 
 
 def _wire_event(event_payload: dict) -> dict:
+    # Stamp schema_version on wire output only (not the hashed event), so the
+    # required EventEnvelope.schema_version is present without touching the chain.
     event = dict(event_payload)
     event["payload"] = event.pop("data", {})
+    event["schema_version"] = GATEWAY_API_VERSION
     return event
 
 
@@ -1380,6 +1483,50 @@ async def _prepare_sse(request: web.Request) -> web.StreamResponse:
 # ---------------------------------------------------------------------------
 # Adapter
 # ---------------------------------------------------------------------------
+
+class _ApprovalRail:
+    """Pending + resolved approval state for one adapter instance.
+
+    First-responder-wins (02-protocol.md "Approval Decisions"): a pending
+    approval is popped atomically on resolve; a later POST against the same
+    tool_call_id returns the stored resolution so the handler can answer 409.
+    """
+
+    def __init__(self) -> None:
+        # tool_call_id -> {"session_key": str, "stream_id": str}
+        self._pending: dict[str, dict] = {}
+        # tool_call_id -> {"decision": str, "by": str, "sid": str, "ts": int}
+        self._resolved: dict[str, dict] = {}
+
+    def register(self, tool_call_id: str, *, session_key: str, stream_id: str) -> None:
+        self._pending[tool_call_id] = {
+            "session_key": session_key,
+            "stream_id": stream_id,
+        }
+
+    def get_resolved(self, tool_call_id: str) -> dict | None:
+        return self._resolved.get(tool_call_id)
+
+    def resolve(
+        self, tool_call_id: str, *,
+        decision: str, by: str, sid: str, ts: int,
+    ) -> dict | None:
+        """Pop the pending entry and record the resolution.
+
+        Returns the popped pending entry, or ``None`` if no such approval is
+        pending (caller answers 404).
+        """
+        pending = self._pending.pop(tool_call_id, None)
+        if pending is None:
+            return None
+        self._resolved[tool_call_id] = {
+            "decision": decision,
+            "by": by,
+            "sid": sid,
+            "ts": ts,
+        }
+        return pending
+
 
 class OpenChatSessionAdapter(BasePlatformAdapter):
     MAX_MESSAGE_LENGTH: int = 0
@@ -1448,21 +1595,24 @@ class OpenChatSessionAdapter(BasePlatformAdapter):
         # device ids. Suppress only the device actively viewing the session.
         self._active_views: dict[tuple[str, str, str], int] = {}
 
-        # tool_call_id -> {"decision": str, "by": str, "sid": str, "ts": int}
-        self._resolved_approvals: dict[str, dict] = {}
-        # tool_call_id -> {session_key, stream_id}
-        self._pending_approvals: dict[str, dict] = {}
+        self._approvals = _ApprovalRail()
         # session_id -> FIFO list of pending clarify_ids. Lets us emit a
         # gateway.clarify.resolved event the moment a user reply arrives so
         # the dashboard's ClarifyBubble disappears immediately (the actual
         # agent-thread unblock is handled by gateway/run.py's text-intercept).
-        self._pending_clarifies: dict[str, list[str]] = {}
+        self._active_clarify_ids: dict[str, list[str]] = {}
         # (session_id, outbound_message_id) -> inbound stream id
         self._message_streams: dict[tuple[str, str], str] = {}
         # (session_id, inbound_stream_id) -> active Hermes dispatch task.
         # This makes /cancel an actual run cancellation path instead of only
         # an audit-log marker.
         self._active_runs: dict[tuple[str, str], asyncio.Task] = {}
+        # Strong refs to fire-and-forget approval auto-deny timers so the loop's
+        # weak refs can't GC them mid-flight.
+        self._timeout_tasks: set[asyncio.Task] = set()
+        # peer_ip -> (monotonic_expiry, (login, tags)); bounds whois subprocess
+        # spawns to ~1 per peer per TTL, even on unauthenticated /health.
+        self._whois_cache: dict[str, tuple[float, tuple[str | None, list[str]]]] = {}
 
         self._app: web.Application | None = None
         self._runner: web.AppRunner | None = None
@@ -1498,7 +1648,7 @@ class OpenChatSessionAdapter(BasePlatformAdapter):
             self._push_dispatcher = PushDispatcher(
                 log=self._log,
                 store=self._push,
-                vapid_key_path=self._vapid.private_pem_path,
+                vapid=self._vapid.instance,
                 vapid_subject=PUSH_VAPID_SUBJECT,
                 session_registry=self._sessions,
                 active_views=self._active_views,
@@ -1562,6 +1712,12 @@ class OpenChatSessionAdapter(BasePlatformAdapter):
         return True
 
     async def disconnect(self) -> None:
+        for timer in list(self._timeout_tasks):
+            timer.cancel()
+        for timer in list(self._timeout_tasks):
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await timer
+        self._timeout_tasks.clear()
         if self._edge is not None:
             with contextlib.suppress(Exception):
                 await self._edge.stop()
@@ -1633,9 +1789,11 @@ class OpenChatSessionAdapter(BasePlatformAdapter):
         return SendResult(success=True, message_id=message_id)
 
     async def send_typing(self, chat_id, metadata=None) -> None:
+        # `active: true` matches the documented gateway.typing payload; there is
+        # no active:false event — clients expire typing via a client-side TTL.
         await self._log.append(
             chat_id, EventKind.TYPING, _stream_id("typing"),
-            {"metadata": metadata or {}},
+            {"active": True, "metadata": metadata or {}},
         )
 
     # Media egress — emits `{message_id, attachments: AttachmentRef[],
@@ -1710,7 +1868,7 @@ class OpenChatSessionAdapter(BasePlatformAdapter):
             caption=caption, reply_to=reply_to,
         )
 
-    def _resolve_media_ref(
+    async def _resolve_media_ref(
         self, chat_id: str, ref: str,
         *, filename: str | None = None, caption: str | None = None,
         uploaded_by: str = "agent",
@@ -1721,7 +1879,12 @@ class OpenChatSessionAdapter(BasePlatformAdapter):
         local_path = _resolve_local_ref(ref)
         if local_path:
             try:
-                info = self._attachments.upload_local(local_path, uploaded_by=uploaded_by)
+                # Offload: upload_local does blocking IO + sha256 + copy up to
+                # the 100 MB cap, which would otherwise stall the event loop.
+                info = await asyncio.to_thread(
+                    self._attachments.upload_local, local_path,
+                    uploaded_by=uploaded_by,
+                )
             except Exception as exc:
                 logger.warning("upload_local failed for %s: %s", ref, exc)
                 return _attachment_ref(ref, filename=filename, caption=caption)
@@ -1743,8 +1906,9 @@ class OpenChatSessionAdapter(BasePlatformAdapter):
     ) -> SendResult:
         message_id = _new_id("o_")
         stream_id = _stream_id(message_id)
+        # Sequential awaits (not gather): preserve order + serialize sqlite.
         attachments = [
-            self._resolve_media_ref(
+            await self._resolve_media_ref(
                 chat_id, r, filename=filename, caption=caption,
             )
             for r in refs if r
@@ -1784,7 +1948,7 @@ class OpenChatSessionAdapter(BasePlatformAdapter):
             if c is not None and str(c).strip()
         ]
         mark_awaiting_text(clarify_id)
-        self._pending_clarifies.setdefault(chat_id, []).append(clarify_id)
+        self._active_clarify_ids.setdefault(chat_id, []).append(clarify_id)
         stream_id = _stream_id(clarify_id)
         await self._log.append(
             chat_id, EventKind.CLARIFY_REQUEST, stream_id,
@@ -1814,10 +1978,9 @@ class OpenChatSessionAdapter(BasePlatformAdapter):
         """
         tool_call_id = _new_id("ap_")
         stream_id = _stream_id(tool_call_id)
-        self._pending_approvals[tool_call_id] = {
-            "session_key": session_key,
-            "stream_id": stream_id,
-        }
+        self._approvals.register(
+            tool_call_id, session_key=session_key, stream_id=stream_id,
+        )
         md = metadata or {}
         await self._log.append(
             chat_id, EventKind.APPROVAL_REQUEST, stream_id,
@@ -1832,9 +1995,12 @@ class OpenChatSessionAdapter(BasePlatformAdapter):
                 "session_key": session_key,
             },
         )
-        asyncio.create_task(self._approval_timeout(
+        # Strong ref so the timer isn't GC'd before the auto-deny fires.
+        timer = asyncio.create_task(self._approval_timeout(
             chat_id, tool_call_id, session_key, stream_id,
         ))
+        self._timeout_tasks.add(timer)
+        timer.add_done_callback(self._timeout_tasks.discard)
         return SendResult(success=True, message_id=tool_call_id)
 
     async def _approval_timeout(
@@ -1843,21 +2009,15 @@ class OpenChatSessionAdapter(BasePlatformAdapter):
     ) -> None:
         """Auto-resolve a pending approval as deny after APPROVAL_TIMEOUT_S.
 
-        No-op if the approval was answered before the timer fires
-        (we only act when ``tool_call_id`` is still in
-        ``_pending_approvals``).
+        No-op if the approval was already answered before the timer fires;
+        the rail's ``resolve`` returns ``None`` in that case.
         """
         await asyncio.sleep(APPROVAL_TIMEOUT_S)
-        if tool_call_id not in self._pending_approvals:
-            return
-        self._pending_approvals.pop(tool_call_id, None)
         ts = _now_ms()
-        self._resolved_approvals[tool_call_id] = {
-            "decision": "deny",
-            "by": "system:timeout",
-            "sid": sid,
-            "ts": ts,
-        }
+        if self._approvals.resolve(
+            tool_call_id, decision="deny", by="system:timeout", sid=sid, ts=ts,
+        ) is None:
+            return
         await self._log.append(
             sid, EventKind.APPROVAL_RESOLVED, stream_id,
             {
@@ -1890,6 +2050,11 @@ class OpenChatSessionAdapter(BasePlatformAdapter):
             return None, []
         if peer_ip in ("127.0.0.1", "::1"):
             return None, []
+        cached = self._whois_cache.get(peer_ip)
+        now = time.monotonic()
+        if cached is not None and cached[0] > now:
+            return cached[1]
+        result: tuple[str | None, list[str]] = (None, [])
         try:
             proc = await asyncio.create_subprocess_exec(
                 "tailscale", "whois", "--json", peer_ip,
@@ -1897,16 +2062,16 @@ class OpenChatSessionAdapter(BasePlatformAdapter):
                 stderr=asyncio.subprocess.DEVNULL,
             )
             stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=2.0)
-            if proc.returncode != 0:
-                return None, []
-            data = json.loads(stdout)
-            user = (data.get("UserProfile") or {}).get("LoginName")
-            tags = (data.get("Node") or {}).get("Tags") or []
-            return user, list(tags)
+            if proc.returncode == 0:
+                data = json.loads(stdout)
+                user = (data.get("UserProfile") or {}).get("LoginName")
+                tags = (data.get("Node") or {}).get("Tags") or []
+                result = (user, list(tags))
         except (asyncio.TimeoutError, json.JSONDecodeError,
                 FileNotFoundError, OSError) as exc:
             logger.debug("tailscale whois failed: %s", exc)
-            return None, []
+        self._whois_cache[peer_ip] = (now + WHOIS_CACHE_TTL_S, result)
+        return result
 
     async def _authorize(self, request: web.Request) -> tuple[str, list[str]]:
         # X-Device-Id is required on every authenticated endpoint — it
@@ -1914,12 +2079,12 @@ class OpenChatSessionAdapter(BasePlatformAdapter):
         # about which app instance is talking. Spec: stable UUID per app
         # install. We don't validate the UUID format (any non-empty string
         # is accepted) but it must be present.
-        device_id = (request.headers.get("X-Device-Id") or "").strip()
+        device_id = (request.headers.get(HEADER_DEVICE_ID) or "").strip()
         if not device_id:
-            raise web.HTTPBadRequest(reason="X-Device-Id header required")
+            raise web.HTTPBadRequest(reason=f"{HEADER_DEVICE_ID} header required")
         request["device_id"] = device_id
         request["client_device_id"] = (
-            request.headers.get("X-Open-Chat-Session-Device-Id")
+            request.headers.get(HEADER_DEVICE_ID_OVERRIDE)
             or device_id
         ).strip()
 
@@ -1936,7 +2101,7 @@ class OpenChatSessionAdapter(BasePlatformAdapter):
             raise web.HTTPUnauthorized(
                 reason="bearer auth not configured (set API_SERVER_KEY)",
             )
-        auth = request.headers.get("Authorization", "")
+        auth = request.headers.get(HEADER_AUTHORIZATION, "")
         token = auth[7:].strip() if auth.startswith("Bearer ") else ""
         if not token or not hmac.compare_digest(token, self._api_server_key):
             raise web.HTTPUnauthorized(reason="valid bearer token required")
@@ -1972,6 +2137,10 @@ class OpenChatSessionAdapter(BasePlatformAdapter):
             time.monotonic() + deadline_s if deadline_s is not None else None
         )
         while True:
+            # Queue overflowed: drop the connection so the client resumes by
+            # Last-Event-ID rather than receiving a gapped chain.
+            if getattr(q, "_ocs_overflowed", False):
+                return
             if deadline is not None:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -1986,6 +2155,8 @@ class OpenChatSessionAdapter(BasePlatformAdapter):
             except asyncio.TimeoutError:
                 await resp.write(b": ping\n\n")
                 continue
+            if getattr(q, "_ocs_overflowed", False):
+                return
             if ev["seq"] <= skip_below_seq:
                 continue
             if accept is not None and not accept(ev):
@@ -2009,7 +2180,7 @@ class OpenChatSessionAdapter(BasePlatformAdapter):
             "platform": PLATFORM_NAME,
             "sessions": len(self._sessions.list()),
             "caller": caller,
-            "gateway_api_version": "2026-05-15",
+            "gateway_api_version": GATEWAY_API_VERSION,
             "server_time": _now_ms(),
         })
 
@@ -2065,7 +2236,7 @@ class OpenChatSessionAdapter(BasePlatformAdapter):
         sid = request.match_info["session_id"]
         self._require_session(sid, include_archived=True)
 
-        last_event_id = request.headers.get("Last-Event-ID") or ""
+        last_event_id = request.headers.get(HEADER_LAST_EVENT_ID) or ""
         cursor = request.query.get("cursor", "")
         q = self._log.subscribe(sid)
         resp: web.StreamResponse | None = None
@@ -2075,6 +2246,10 @@ class OpenChatSessionAdapter(BasePlatformAdapter):
 
         try:
             resync_payload: dict[str, Any] | None = None
+            # Full-history paths page through the whole log (replay_after = seq);
+            # bounded tail paths use a capped list (replay_tail).
+            replay_after: int | None = None
+            replay_tail: list[dict] | None = None
             if last_event_id:
                 seq = self._log.lookup_hash(sid, last_event_id)
                 if seq is None:
@@ -2084,26 +2259,32 @@ class OpenChatSessionAdapter(BasePlatformAdapter):
                         "from_seq": 0,
                         "unknown_tip": last_event_id,
                     }
-                    replay = self._log.range_after(sid, 0)
+                    replay_after = 0
                 else:
-                    replay = self._log.range_after(sid, seq)
+                    replay_after = seq
             elif cursor == "genesis" or cursor == "snapshot":
-                replay = self._log.range_after(sid, 0)
+                replay_after = 0
             elif cursor.startswith("latest:"):
                 try:
                     n = int(cursor.split(":", 1)[1])
                 except ValueError:
                     n = 200
-                replay = self._log.last_n(sid, n)
+                replay_tail = self._log.last_n(sid, n)
             else:
-                replay = self._log.last_n(sid, 200)
+                replay_tail = self._log.last_n(sid, 200)
 
-            start_seq = replay[-1]["seq"] if replay else 0
             resp = await _prepare_sse(request)
             if resync_payload is not None:
                 await resp.write(_sse_simple(EventKind.RESYNC, resync_payload))
-            for ev in replay:
-                await resp.write(_sse_event(ev))
+            start_seq = 0
+            if replay_after is not None:
+                for ev in self._log.iter_after(sid, replay_after):
+                    await resp.write(_sse_event(ev))
+                    start_seq = ev["seq"]
+            else:
+                for ev in replay_tail or []:
+                    await resp.write(_sse_event(ev))
+                    start_seq = ev["seq"]
             await self._stream_sse(resp, q, skip_below_seq=start_seq)
         except (asyncio.CancelledError, ConnectionResetError):
             pass
@@ -2196,48 +2377,50 @@ class OpenChatSessionAdapter(BasePlatformAdapter):
             internal=True,
         )
 
-        # Subscribe BEFORE appending so the POSTer sees their own in.message
-        # in the SSE response.
+        # Subscribe BEFORE appending so the POSTer sees their own in.message.
+        # Everything after subscribe lives in the try/finally so a mid-handshake
+        # failure still unsubscribes the queue instead of leaking it into _subs.
         q = self._log.subscribe(sid)
+        resp: web.StreamResponse | None = None
+        try:
+            # Pending clarify for this session: emit a resolved event now (FIFO,
+            # matching run.py's text-intercept) so the dashboard's ClarifyBubble
+            # disappears immediately. Stamp req_id as stream_id so the POSTer's
+            # filtered SSE response delivers it.
+            active_clarifies = self._active_clarify_ids.get(sid) or []
+            if active_clarifies:
+                cid = active_clarifies.pop(0)
+                if not active_clarifies:
+                    self._active_clarify_ids.pop(sid, None)
+                await self._log.append(
+                    sid, EventKind.CLARIFY_RESOLVED, req_id,
+                    {"clarify_id": cid, "response": text, "resolved_by": user},
+                )
 
-        # If there's a pending clarify for this session, emit a resolved event
-        # NOW (FIFO, matching gateway/run.py's text-intercept behavior). The
-        # actual agent-thread unblock happens later in run.py — this event
-        # exists so the dashboard's ClarifyBubble can disappear immediately.
-        # Stamp it with req_id as stream_id so the POSTer's SSE response
-        # (filtered on stream_id == req_id) delivers it without relying on
-        # the separate /events live subscription.
-        pending_clarifies = self._pending_clarifies.get(sid) or []
-        if pending_clarifies:
-            cid = pending_clarifies.pop(0)
-            if not pending_clarifies:
-                self._pending_clarifies.pop(sid, None)
             await self._log.append(
-                sid, EventKind.CLARIFY_RESOLVED, req_id,
-                {"clarify_id": cid, "response": text, "resolved_by": user},
+                sid, EventKind.MESSAGE_IN, req_id,
+                {
+                    "message_id": req_id,
+                    "author": user,
+                    "text": text,
+                    "attachments": attachment_refs,
+                    "reply_to": reply_to,
+                    "thread_id": thread_id,
+                },
+            )
+            logger.info(
+                "message in sid=%s author=%s len=%d",
+                sid, _redact_identity(user), len(text),
             )
 
-        await self._log.append(
-            sid, EventKind.MESSAGE_IN, req_id,
-            {
-                "message_id": req_id,
-                "author": user,
-                "text": text,
-                "attachments": attachment_refs,
-                "reply_to": reply_to,
-                "thread_id": thread_id,
-            },
-        )
-        logger.info("message in sid=%s author=%s len=%d", sid, user, len(text))
+            resp = await _prepare_sse(request)
 
-        resp = await _prepare_sse(request)
+            # Dispatch to hermes; outbound events arrive via send / edit_message
+            # → log fan-out → our queue.
+            task = asyncio.create_task(
+                self._safe_handle_message(event, sid, req_id))
+            self._active_runs[(sid, req_id)] = task
 
-        # Dispatch to hermes; outbound events arrive via send / edit_message
-        # → log fan-out → our queue.
-        task = asyncio.create_task(self._safe_handle_message(event, sid, req_id))
-        self._active_runs[(sid, req_id)] = task
-
-        try:
             def _is_terminal(ev: dict) -> bool:
                 if ev["kind"] in (EventKind.ERROR, EventKind.MESSAGE_CANCEL):
                     return True
@@ -2261,8 +2444,9 @@ class OpenChatSessionAdapter(BasePlatformAdapter):
         finally:
             self._log.unsubscribe(sid, q)
             with contextlib.suppress(Exception):
-                await resp.write_eof()
-        return resp
+                if resp is not None:
+                    await resp.write_eof()
+        return resp or web.Response(status=500)
 
     async def _safe_handle_message(
         self, event: MessageEvent, sid: str, stream_id: str,
@@ -2288,13 +2472,13 @@ class OpenChatSessionAdapter(BasePlatformAdapter):
         sess = self._require_session(sid)
         body = await _body_json(request)
         requested_stream_id = str(body.get("stream_id") or "")
+        # Empty stream_id means "cancel the active run(s)"; if none are active,
+        # targets stays empty (no MESSAGE_CANCEL with an empty stream_id).
         targets = (
             [requested_stream_id]
             if requested_stream_id
             else [stream_id for sess_id, stream_id in self._active_runs if sess_id == sid]
         )
-        if not targets:
-            targets = [requested_stream_id]
 
         cancelled = 0
         for stream_id in targets:
@@ -2343,6 +2527,9 @@ class OpenChatSessionAdapter(BasePlatformAdapter):
             with contextlib.suppress(Exception):
                 from tools.approval import resolve_gateway_approval
                 resolve_gateway_approval(key, "deny", resolve_all=True)
+        # Drop queued clarify ids so a cancelled clarify isn't later emitted as
+        # a spurious CLARIFY_RESOLVED.
+        self._active_clarify_ids.pop(sid, None)
         return web.json_response({
             "acknowledged": True,
             "cancelled": cancelled,
@@ -2362,7 +2549,7 @@ class OpenChatSessionAdapter(BasePlatformAdapter):
             )
 
         # First-responder-wins
-        prior = self._resolved_approvals.get(tool_call_id)
+        prior = self._approvals.get_resolved(tool_call_id)
         if prior is not None:
             return web.json_response(
                 {
@@ -2373,17 +2560,12 @@ class OpenChatSessionAdapter(BasePlatformAdapter):
                 },
                 status=409,
             )
-        pending = self._pending_approvals.pop(tool_call_id, None)
+        ts = _now_ms()
+        pending = self._approvals.resolve(
+            tool_call_id, decision=decision, by=user, sid=sid, ts=ts,
+        )
         if pending is None:
             raise web.HTTPNotFound(reason="unknown approval")
-
-        ts = _now_ms()
-        self._resolved_approvals[tool_call_id] = {
-            "decision": decision,
-            "by": user,
-            "sid": sid,
-            "ts": ts,
-        }
         stream_id = pending.get("stream_id", tool_call_id)
         await self._log.append(
             sid, EventKind.APPROVAL_RESOLVED, stream_id,
@@ -2394,8 +2576,10 @@ class OpenChatSessionAdapter(BasePlatformAdapter):
                 "resolved_at": ts,
             },
         )
-        logger.info("approval resolved tool_call_id=%s decision=%s by=%s",
-                    tool_call_id, decision, user)
+        logger.info(
+            "approval resolved tool_call_id=%s decision=%s by=%s",
+            tool_call_id, decision, _redact_identity(user),
+        )
         try:
             from tools.approval import resolve_gateway_approval
             resolve_gateway_approval(pending["session_key"], decision)
@@ -2404,7 +2588,7 @@ class OpenChatSessionAdapter(BasePlatformAdapter):
 
         return web.json_response({"resolved_by": user, "decision": decision})
 
-    # --- push delivery (Phase 4) ---
+    # --- push delivery ---
 
     def _require_push(self) -> None:
         if self._push_dispatcher is None:
@@ -2490,7 +2674,14 @@ class OpenChatSessionAdapter(BasePlatformAdapter):
         info, path = res
         if not path.exists():
             raise web.HTTPNotFound(reason="file missing")
-        return web.FileResponse(path, headers={"Content-Type": info.mime})
+        # Stored mime is attacker-controlled (verbatim from upload), so nosniff +
+        # attachment disposition prevent stored XSS from an uploaded
+        # text/html / svg. The dashboard's fetch()->blob render is unaffected.
+        return web.FileResponse(path, headers={
+            "Content-Type": info.mime,
+            "X-Content-Type-Options": "nosniff",
+            "Content-Disposition": "attachment",
+        })
 
     async def _handle_history(self, request) -> web.Response:
         await self._authorize(request)
@@ -2505,7 +2696,12 @@ class OpenChatSessionAdapter(BasePlatformAdapter):
         if seq is None:
             seq = 0
         events = self._log.range_after(sid, seq, limit=limit)
-        return web.json_response({"events": [_wire_event(ev) for ev in events]})
+        resp: dict[str, Any] = {"events": [_wire_event(ev) for ev in events]}
+        # A full page implies more may follow; expose next_cursor so a client
+        # can page forward (HistoryResponse.next_cursor, 07-client-api.md).
+        if events and len(events) == limit:
+            resp["next_cursor"] = events[-1]["hash"]
+        return web.json_response(resp)
 
 
 # ---------------------------------------------------------------------------

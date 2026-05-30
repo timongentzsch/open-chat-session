@@ -141,12 +141,9 @@ def _passthrough_response_headers(upstream_headers: httpx.Headers) -> dict[str, 
     }
 
 
-# PWA assets (sw.js, manifest.webmanifest, icons/*.png) live in
-# dashboard/public/ and are served by the host's /dashboard-plugins/<name>/...
-# static route at hermes_cli/web_server.py:4308. That route bypasses the
-# session-token middleware which is necessary because the browser fetches
-# service workers, manifests, and notification icons without our custom
-# auth header. No host change required.
+# PWA assets (sw.js, manifest.json, icons) are served by the plugin's own
+# TailnetEdge (adapter.py), not this proxy — it serves dashboard/public/* and
+# bypasses the session-token middleware the browser can't send for SW/manifest.
 
 @router.api_route(
     "/{path:path}",

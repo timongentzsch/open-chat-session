@@ -1,7 +1,7 @@
 // `/chat-session` page: sessions sidebar, assistant-ui thread/composer,
 // and the approval rail.
 
-import { React, cn, useCallback, useEffect, useMemo, useState } from "@/sdk";
+import { React, cn, useCallback, useEffect, useMemo, useRef, useState } from "@/sdk";
 import { useGatewayClient } from "@/hooks/useGatewayClient";
 import { useSessions } from "@/hooks/useSessions";
 import { useResumeParam } from "@/hooks/useResumeParam";
@@ -23,11 +23,15 @@ import { HEALTH_POLL_MS } from "@/constants";
 
 export function ChatPage() {
   const client = useGatewayClient();
-  const { sessions, loading, error: sessionsError, refresh, createSession } =
+  const { sessions, loading, error: sessionsError, refresh, createSession, archiveSession } =
     useSessions(client);
   const { resume, setResume } = useResumeParam();
 
   const [selected, setSelected] = useState<string | null>(() => getSelectedSession());
+  // Tracks the live selection so in-flight stream drains can detect a
+  // mid-stream session switch and stop writing into the (now reset) store.
+  const selectedRef = useRef(selected);
+  selectedRef.current = selected;
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [healthError, setHealthError] = useState<string | null>(null);
   const [replyTo, setReplyTo] = useState<string | null>(null);
@@ -152,6 +156,17 @@ export function ChatPage() {
     [createSession, handleSelect],
   );
 
+  const handleArchive = useCallback(
+    async (sessionId: string) => {
+      const ok = await archiveSession(sessionId);
+      if (ok && selected === sessionId) {
+        setSelected(null);
+        setResume(null);
+      }
+    },
+    [archiveSession, selected, setResume],
+  );
+
   const { state, store, runtime, conn, isTyping } = useSessionRuntime(
     client,
     selected,
@@ -192,6 +207,9 @@ export function ChatPage() {
       if (!selected) return;
       const gen = client.sendMessage(selected, { text: choice });
       for await (const env of gen) {
+        // Stop if the user switched sessions mid-stream: the shared store was
+        // reset for the new session, so these events no longer belong to it.
+        if (selectedRef.current !== selected) break;
         store.applyEvent(env);
       }
     },
@@ -207,8 +225,8 @@ export function ChatPage() {
   // sole scroller.
   return (
     <div data-aui-ocs-plugin className={cn("absolute inset-0 flex flex-col min-h-0")}>
-      <style precedence="default">{PLUGIN_CURSOR_CSS}</style>
-      <style precedence="default">{OCS_LAYOUT_CSS}</style>
+      <style href="ocs-style-cursor" precedence="default">{PLUGIN_CURSOR_CSS}</style>
+      <style href="ocs-style-layout" precedence="default">{OCS_LAYOUT_CSS}</style>
       <header
         data-aui-ocs-header
         className={cn(
@@ -259,6 +277,7 @@ export function ChatPage() {
           selectedId={selected}
           onSelect={handleSelect}
           onCreate={handleCreate}
+          onArchive={handleArchive}
           loading={loading}
           error={sessionsError}
           mobileOpen={sidebarOpen}

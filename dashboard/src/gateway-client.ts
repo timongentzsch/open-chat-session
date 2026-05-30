@@ -111,12 +111,28 @@ export class GatewayClient {
     await this.expect(res, fallbackCode);
     for await (const frame of parseSSE(res)) {
       if (!frame.data) continue;
+      let parsed: unknown;
       try {
-        const parsed: unknown = JSON.parse(frame.data);
-        if (!isEventEnvelope(parsed)) continue;
-        yield parsed;
+        parsed = JSON.parse(frame.data);
       } catch {
         // Ignore malformed frames; the next valid one re-anchors via hash chain.
+        continue;
+      }
+      if (isEventEnvelope(parsed)) {
+        yield parsed;
+        continue;
+      }
+      // The proxy reports an upstream >=400 as a flat `gateway.error` frame
+      // ({code,status,message}, not an envelope) inside a 200 response. Surface
+      // it as a GatewayError so reconnect/banner runs instead of ending
+      // silently. Real adapter gateway.error events are envelopes, handled above.
+      if (frame.event === "gateway.error") {
+        const body = (parsed ?? {}) as { code?: string; status?: number; message?: string };
+        throw new GatewayError(
+          body.status ?? 502,
+          body.code ?? "stream_error",
+          body.message ?? "stream error",
+        );
       }
     }
   }
@@ -140,6 +156,14 @@ export class GatewayClient {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(req),
     });
+  }
+
+  archiveSession(sessionId: string): Promise<void> {
+    return this.requestVoid(
+      `/sessions/${encodeURIComponent(sessionId)}`,
+      "archive_failed",
+      { method: "DELETE" },
+    );
   }
 
   async history(
@@ -179,7 +203,7 @@ export class GatewayClient {
     );
   }
 
-  // --- Push devices (Phase 4) ---
+  // --- Push devices ---
 
   getVapidPublicKey(): Promise<VapidPublicKeyResponse> {
     return this.request<VapidPublicKeyResponse>("/devices/push/vapid-public-key");

@@ -17,6 +17,19 @@ export const actionButton =
 export const fieldBase =
   "h-9 min-w-0 border border-midground/30 bg-transparent px-2 text-sm leading-5 text-foreground placeholder:text-midground/50 focus:border-foreground/60 focus:outline-none focus:ring-1 focus:ring-foreground/20";
 
+// Small square action button used for hover-revealed controls — message
+// bubble copy/reply and session-row archive. Kept here so the surfaces
+// stay visually identical.
+export const bubbleActionClass =
+  "flex items-center justify-center border border-midground/25 bg-background text-midground/70 shadow transition hover:text-foreground";
+export const bubbleActionStyle = { width: "1.5rem", height: "1.5rem" } as const;
+
+// Inline remove button (h-5 w-5) used for in-row dismiss controls —
+// attachment chip "×", reply-target "×". Different from bubbleActionClass:
+// no background, no shadow, sits inline with adjacent text/inputs.
+export const smallIconControl =
+  "flex h-5 w-5 shrink-0 items-center justify-center border border-midground/25 text-midground/70 hover:text-foreground";
+
 export const REPLY_PREVIEW_LEN = 140;
 
 export function toneClass(kind: "success" | "warning" | "destructive" | "midground" | "idle"): string {

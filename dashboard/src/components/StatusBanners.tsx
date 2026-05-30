@@ -1,4 +1,6 @@
 import { React, cn } from "@/sdk";
+// Required in scope by the classic JSX transform (vite.config.ts).
+void React;
 import type { ConnState } from "@/runtime/external-runtime";
 import { controlBase, PILL_TONES, BANNER_TEXT_TONES, BANNER_BORDER, type BannerTone } from "@/ui";
 import { BANNER_CSS } from "@/chat-styles";
@@ -38,7 +40,7 @@ export function ConnectionPill({
       )}
       title={title}
     >
-      <span className={cn("h-1.5 w-1.5 bg-current")} aria-hidden />
+      <span className="h-1.5 w-1.5 bg-current" aria-hidden />
       {pillText(conn, platform, healthError)}
     </span>
   );
@@ -57,7 +59,7 @@ export function Banner({
 }) {
   return (
     <>
-      <style precedence="default">{BANNER_CSS}</style>
+      <style href="ocs-style-banner" precedence="default">{BANNER_CSS}</style>
       <div
         data-aui-ocs-banner-tone={tone}
         className={cn(
@@ -66,7 +68,7 @@ export function Banner({
           BANNER_TEXT_TONES[tone],
         )}
       >
-        <div className={cn("flex items-center justify-between gap-3")}>
+        <div className="flex items-center justify-between gap-3">
           <span>{message}</span>
           {onDismiss && (
             <button
@@ -79,7 +81,7 @@ export function Banner({
             </button>
           )}
         </div>
-        {detail && <span className={cn("text-[11px] opacity-80")}>{detail}</span>}
+        {detail && <span className="text-[11px] opacity-80">{detail}</span>}
       </div>
     </>
   );

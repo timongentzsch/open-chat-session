@@ -1,4 +1,8 @@
-import { React, cn } from "@/sdk";
+import { React, cn, useCallback, useEffect, useRef, useState } from "@/sdk";
+// `React` is intentionally imported but unused at the top level — Vite's
+// esbuild JSX transform compiles every <jsx /> to `React.createElement(...)`
+// and needs that binding in scope. See vite.config.ts `esbuild.jsxFactory`.
+void React;
 import {
   AttachmentPrimitive,
   ComposerPrimitive,
@@ -7,10 +11,10 @@ import {
   useAui,
 } from "@assistant-ui/react";
 import type { Unstable_TriggerItem } from "@assistant-ui/core";
-import { controlBase, fieldBase, iconButton } from "@/ui";
+import { controlBase, fieldBase, iconButton, smallIconControl } from "@/ui";
 import { SLASH_ITEM_CSS, COMPOSER_CSS, SURFACE_CSS } from "@/chat-styles";
 import type { OurMessage } from "@/runtime/session-store";
-import { PaperclipIcon, RemoveIcon, MicIcon, StopRecordIcon } from "@/components/icons";
+import { PaperclipIcon, RemoveIcon, MicIcon, StopRecordIcon, SendIcon } from "@/components/icons";
 import { previewText } from "@/lib/preview";
 
 const SLASH_COMMANDS = [
@@ -64,15 +68,15 @@ const CHUNK_INTERVAL_MS = 250;
 
 function VoiceRecordButton() {
   const aui = useAui();
-  const [recording, setRecording] = React.useState(false);
-  const [elapsed, setElapsed] = React.useState(0);
-  const [error, setError] = React.useState<string | null>(null);
-  const recorderRef = React.useRef<MediaRecorder | null>(null);
-  const streamRef = React.useRef<MediaStream | null>(null);
-  const chunksRef = React.useRef<Blob[]>([]);
-  const startTsRef = React.useRef<number>(0);
+  const [recording, setRecording] = useState(false);
+  const [elapsed, setElapsed] = useState(0);
+  const [error, setError] = useState<string | null>(null);
+  const recorderRef = useRef<MediaRecorder | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const chunksRef = useRef<Blob[]>([]);
+  const startTsRef = useRef<number>(0);
 
-  React.useEffect(() => {
+  useEffect(() => {
     if (!recording) return;
     const id = window.setInterval(() => {
       setElapsed(Date.now() - startTsRef.current);
@@ -81,20 +85,20 @@ function VoiceRecordButton() {
   }, [recording]);
 
   // Hide a transient error after a few seconds.
-  React.useEffect(() => {
+  useEffect(() => {
     if (!error) return;
     const id = window.setTimeout(() => setError(null), ERROR_TIMEOUT_MS);
     return () => window.clearTimeout(id);
   }, [error]);
 
-  const cleanup = React.useCallback(() => {
+  const cleanup = useCallback(() => {
     streamRef.current?.getTracks().forEach((t) => t.stop());
     streamRef.current = null;
     recorderRef.current = null;
     chunksRef.current = [];
   }, []);
 
-  const start = React.useCallback(async () => {
+  const start = useCallback(async () => {
     setError(null);
     if (typeof navigator === "undefined" || !navigator.mediaDevices?.getUserMedia) {
       setError("recording not supported");
@@ -147,7 +151,7 @@ function VoiceRecordButton() {
     rec.start(CHUNK_INTERVAL_MS);
   }, [aui, cleanup]);
 
-  const stop = React.useCallback(() => {
+  const stop = useCallback(() => {
     const rec = recorderRef.current;
     setRecording(false);
     if (!rec || rec.state === "inactive") {
@@ -162,7 +166,7 @@ function VoiceRecordButton() {
     rec.stop();
   }, [cleanup]);
 
-  React.useEffect(() => () => cleanup(), [cleanup]);
+  useEffect(() => () => cleanup(), [cleanup]);
 
   if (recording) {
     return (
@@ -209,7 +213,7 @@ function ComposerAttachment() {
       <AttachmentPrimitive.Name />
       <AttachmentPrimitive.Remove
         data-aui-ocs-control
-        className="ml-auto flex h-5 w-5 shrink-0 items-center justify-center border border-midground/25 text-midground/70 hover:text-foreground"
+        className={cn("ml-auto", smallIconControl)}
         aria-label="remove attachment"
       >
         <RemoveIcon />
@@ -238,7 +242,10 @@ function SlashCommands() {
     removeOnExecute: true,
     commands: SLASH_COMMANDS.map(([id, description]) => ({
       id,
-      label: `/${id}`,
+      // The popover already shows a leading "/" badge to the left of each
+      // row; including it in the label too is redundant. The inserted text
+      // still gets the slash (see commitSlashCommand).
+      label: id,
       description,
       execute: () => commitSlashCommand(aui, id),
     })),
@@ -251,7 +258,7 @@ function SlashCommands() {
       className="absolute z-20 flex flex-col overflow-hidden border border-midground/30 bg-background p-1 shadow-xl"
       data-aui-ocs-slash-popover
     >
-      <style precedence="default">{SLASH_ITEM_CSS}</style>
+      <style href="ocs-style-slash-item" precedence="default">{SLASH_ITEM_CSS}</style>
       <ComposerPrimitive.Unstable_TriggerPopover.Action {...slash.action} />
       <ComposerPrimitive.Unstable_TriggerPopoverItems>
         {(items) => (
@@ -271,11 +278,11 @@ function SlashCommands() {
 }
 
 function SlashCommandItem({ item, index }: { item: Unstable_TriggerItem; index: number }) {
-  const ref = React.useRef<HTMLButtonElement | null>(null);
+  const ref = useRef<HTMLButtonElement | null>(null);
   const { highlightedIndex } = unstable_useTriggerPopoverScopeContext();
   const isHighlighted = highlightedIndex === index;
 
-  React.useEffect(() => {
+  useEffect(() => {
     if (!isHighlighted) return;
     ref.current?.scrollIntoView({ block: "nearest" });
   }, [isHighlighted]);
@@ -319,8 +326,8 @@ export function Composer({
     <ComposerPrimitive.AttachmentDropzone
       data-aui-ocs-composer
     >
-      <style precedence="default">{COMPOSER_CSS}</style>
-      <style precedence="default">{SURFACE_CSS}</style>
+      <style href="ocs-style-composer" precedence="default">{COMPOSER_CSS}</style>
+      <style href="ocs-style-surface" precedence="default">{SURFACE_CSS}</style>
       <ComposerPrimitive.Unstable_TriggerPopoverRoot>
         <ComposerPrimitive.Root className="relative flex flex-col gap-1.5 px-3 py-2">
           {replyTarget && (
@@ -334,7 +341,7 @@ export function Composer({
               <button
                 data-aui-ocs-control
                 type="button"
-                className="flex h-5 w-5 shrink-0 items-center justify-center border border-midground/25 text-midground/70 hover:text-foreground"
+                className={smallIconControl}
                 onClick={onCancelReply}
                 aria-label="cancel reply"
                 title="cancel reply"
@@ -346,7 +353,7 @@ export function Composer({
           <ComposerPrimitive.Attachments>
             {() => <ComposerAttachment />}
           </ComposerPrimitive.Attachments>
-          <div data-aui-ocs-composer-row className={cn("flex items-end gap-2")}>
+          <div data-aui-ocs-composer-row className="flex items-end gap-2">
             <ComposerPrimitive.AddAttachment
               data-aui-ocs-control
               className={cn(iconButton, "shrink-0")}
@@ -366,6 +373,14 @@ export function Composer({
                 "max-h-40 flex-1 resize-none",
               )}
             />
+            <ComposerPrimitive.Send
+              data-aui-ocs-control
+              className={cn(iconButton, "shrink-0 disabled:opacity-40")}
+              aria-label="send"
+              title="send"
+            >
+              <SendIcon />
+            </ComposerPrimitive.Send>
           </div>
           <SlashCommands />
         </ComposerPrimitive.Root>

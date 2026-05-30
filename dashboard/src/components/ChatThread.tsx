@@ -1,4 +1,4 @@
-import { React, cn } from "@/sdk";
+import { React, cn, useEffect, useMemo, useRef, useState } from "@/sdk";
 import {
   ActionBarPrimitive,
   AuiIf,
@@ -15,16 +15,16 @@ import { MarkdownText } from "@/components/MarkdownText";
 import { BUBBLE_AND_SPACING_CSS } from "@/chat-styles";
 import type { ApprovalView, ClarifyView, OurMessage } from "@/runtime/session-store";
 import { DownIcon, ReplyIcon, CopyIcon, CheckIcon } from "@/components/icons";
-import { previewText } from "@/lib/preview";
-import { actionButton, DECISION_LABEL, DECISION_TONE } from "@/ui";
+import {
+  actionButton,
+  bubbleActionClass,
+  bubbleActionStyle,
+  DECISION_LABEL,
+  DECISION_TONE,
+} from "@/ui";
 
 const DEFAULT_EMPTY_HINT = "No messages yet. Send something below.";
 const TYPING_DOT_DELAYS_MS = [0, 120, 240];
-
-// Shared style for the small bubble action-bar buttons (copy / reply).
-const BUBBLE_ACTION_CLASS =
-  "flex items-center justify-center border border-midground/25 bg-background text-midground/70 shadow transition hover:text-foreground";
-const BUBBLE_ACTION_STYLE = { width: "1.5rem", height: "1.5rem" } as const;
 
 const TIME_FMT = new Intl.DateTimeFormat(undefined, {
   hour: "2-digit", minute: "2-digit", hour12: false,
@@ -44,6 +44,7 @@ function formatMessageTime(d: Date): string {
 export interface ChatThreadProps {
   sessionId: string;
   attachments: Record<string, AttachmentRef[]>;
+  /** Ordered messages — used only to dedupe consecutive timestamps. */
   messages: OurMessage[];
   /** Pending approvals — rendered as bubbles at the end of the thread. */
   pendingApprovals?: ApprovalView[];
@@ -102,19 +103,52 @@ export function ChatThread({
 }: ChatThreadProps) {
   const pendingList = pendingApprovals ?? [];
   const clarifyList = pendingClarifies ?? [];
-  const messagesById = React.useMemo(
-    () => Object.fromEntries(messages.map((m) => [m.id, m])),
-    [messages],
-  );
-  const previousMessageById = React.useMemo(
-    () => Object.fromEntries(messages.map((m, i) => [m.id, messages[i - 1]?.id])),
-    [messages],
-  );
+
+  // Show a message's time only when it differs from the previous message's
+  // displayed time. Precomputed by id (render-stable, not closure state).
+  const showTimeIds = useMemo(() => {
+    const ids = new Set<string>();
+    let prev: string | null = null;
+    for (const m of messages) {
+      const label = formatMessageTime(new Date(m.ts));
+      if (label !== prev) { ids.add(m.id); prev = label; }
+    }
+    return ids;
+  }, [messages]);
+
+  // Own the button's visibility: assistant-ui's isAtBottom can go stale after a
+  // late layout shift, so re-measure on scroll/resize/mutation with a tolerance.
+  const viewportRef = useRef<HTMLDivElement>(null);
+  const [showScrollButton, setShowScrollButton] = useState(false);
+  useEffect(() => {
+    const vp = viewportRef.current;
+    if (!vp) return;
+    const TOLERANCE_PX = 48;
+    let frame = 0;
+    const measure = () => {
+      frame = 0;
+      setShowScrollButton(vp.scrollHeight - vp.clientHeight - vp.scrollTop > TOLERANCE_PX);
+    };
+    const schedule = () => { if (!frame) frame = requestAnimationFrame(measure); };
+    measure();
+    vp.addEventListener("scroll", schedule, { passive: true });
+    const ro = new ResizeObserver(schedule);
+    ro.observe(vp);
+    const mo = new MutationObserver(schedule);
+    mo.observe(vp, { childList: true, subtree: true });
+    return () => {
+      vp.removeEventListener("scroll", schedule);
+      ro.disconnect();
+      mo.disconnect();
+      if (frame) cancelAnimationFrame(frame);
+    };
+  }, []);
 
   return (
     <ThreadPrimitive.Root className="flex min-h-0 flex-1 flex-col">
-      <style precedence="default">{BUBBLE_AND_SPACING_CSS}</style>
+      <style href="ocs-style-bubble-spacing" precedence="default">{BUBBLE_AND_SPACING_CSS}</style>
       <ThreadPrimitive.Viewport
+        ref={viewportRef}
         autoScroll
         scrollToBottomOnRunStart={false}
         data-aui-ocs-thread-viewport
@@ -130,10 +164,9 @@ export function ChatThread({
             <Bubble
               sessionId={sessionId}
               attachments={attachments}
-              messagesById={messagesById}
-              previousMessageById={previousMessageById}
               role={message.role === "user" ? "user" : "assistant"}
               onReply={onReply}
+              showTime={showTimeIds.has(message.id)}
             />
           )}
         </ThreadPrimitive.Messages>
@@ -149,15 +182,17 @@ export function ChatThread({
       </ThreadPrimitive.Viewport>
       {footer && (
         <div data-aui-ocs-footer className="relative shrink-0 bg-background">
-          <ThreadPrimitive.ScrollToBottom
-            data-aui-ocs-control
-            behavior="smooth"
-            className="ocs-scroll-bottom absolute right-4 bottom-full z-10 mb-2 flex h-8 w-8 items-center justify-center border border-midground/30 bg-background text-midground/80 shadow hover:text-foreground"
-            aria-label="scroll to bottom"
-            title="scroll to bottom"
-          >
-            <DownIcon />
-          </ThreadPrimitive.ScrollToBottom>
+          {showScrollButton && (
+            <ThreadPrimitive.ScrollToBottom
+              data-aui-ocs-control
+              behavior="smooth"
+              className="ocs-scroll-bottom absolute right-4 bottom-full z-10 mb-2 flex h-8 w-8 items-center justify-center border border-midground/30 bg-background text-midground/80 shadow hover:text-foreground"
+              aria-label="scroll to bottom"
+              title="scroll to bottom"
+            >
+              <DownIcon />
+            </ThreadPrimitive.ScrollToBottom>
+          )}
           {footer}
         </div>
       )}
@@ -168,10 +203,9 @@ export function ChatThread({
 interface BubbleProps {
   sessionId: string;
   attachments: Record<string, AttachmentRef[]>;
-  messagesById: Record<string, OurMessage>;
-  previousMessageById: Record<string, string | undefined>;
   role: "user" | "assistant";
   onReply?: (messageId: string) => void;
+  showTime?: boolean;
 }
 
 function ApprovalBubble({
@@ -181,8 +215,8 @@ function ApprovalBubble({
   approval: ApprovalView;
   onDecide: (toolCallId: string, decision: ApprovalDecision) => Promise<void>;
 }) {
-  const [busy, setBusy] = React.useState<ApprovalDecision | null>(null);
-  const [error, setError] = React.useState<string | null>(null);
+  const [busy, setBusy] = useState<ApprovalDecision | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
   const decide = async (d: ApprovalDecision) => {
     setBusy(d);
@@ -241,7 +275,7 @@ function ClarifyBubble({
   clarify: ClarifyView;
   onRespond: (choice: string) => Promise<void>;
 }) {
-  const [busy, setBusy] = React.useState<string | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
 
   const pick = async (choice: string) => {
     setBusy(choice);
@@ -309,12 +343,9 @@ function PendingActionBubble({
   );
 }
 
-function Bubble({ sessionId, attachments, messagesById, previousMessageById, role, onReply }: BubbleProps) {
+function Bubble({ sessionId, attachments, role, onReply, showTime = true }: BubbleProps) {
   const message = useMessage();
   const { id } = message;
-  const meta = messagesById[id];
-  const replyTarget = meta?.replyTo ? messagesById[meta.replyTo] : undefined;
-  const showReplyContext = !!replyTarget && previousMessageById[id] !== meta?.replyTo;
   const chips = attachments[id] ?? [];
   const isUser = role === "user";
   const hasText = (message.content ?? []).some((p) =>
@@ -336,20 +367,6 @@ function Bubble({ sessionId, attachments, messagesById, previousMessageById, rol
       className={cn("flex flex-col first:mt-0", isUser ? "items-end" : "items-start")}
     >
       <div className={cn("relative flex max-w-[80%] flex-col", isUser ? "items-end" : "items-start")}>
-        {showReplyContext && (
-          <div
-            data-aui-ocs-reply-context
-            className={cn(
-              "mb-1 flex max-w-full items-center gap-2 px-1 text-[11px] text-midground/60",
-              isUser ? "justify-end text-right" : "justify-start",
-            )}
-          >
-            <span className="h-4 w-4 shrink-0 border-l border-t border-midground/30" />
-            <span className="truncate">
-              replying to {replyTarget.role}: {previewText(replyTarget.content)}
-            </span>
-          </div>
-        )}
         <div
           data-aui-ocs-bubble
           data-aui-ocs-replyable={onReply ? "" : undefined}
@@ -370,8 +387,8 @@ function Bubble({ sessionId, attachments, messagesById, previousMessageById, rol
             <ActionBarPrimitive.Copy
               data-aui-ocs-control
               data-aui-ocs-reply-button
-              className={BUBBLE_ACTION_CLASS}
-              style={BUBBLE_ACTION_STYLE}
+              className={bubbleActionClass}
+              style={bubbleActionStyle}
               aria-label="copy"
               title="copy message"
             >
@@ -388,8 +405,8 @@ function Bubble({ sessionId, attachments, messagesById, previousMessageById, rol
                 data-aui-ocs-reply-button
                 type="button"
                 onClick={() => onReply(id)}
-                className={BUBBLE_ACTION_CLASS}
-                style={BUBBLE_ACTION_STYLE}
+                className={bubbleActionClass}
+                style={bubbleActionStyle}
                 aria-label="reply"
                 title="reply"
               >
@@ -416,8 +433,8 @@ function Bubble({ sessionId, attachments, messagesById, previousMessageById, rol
           )}
         </div>
       </div>
-      {message.createdAt && (
-        <span className={cn("mt-0.5 text-[10px] tracking-[0.06em] text-midground/50 px-1")}>
+      {showTime && message.createdAt && (
+        <span className="mt-0.5 text-[10px] tracking-[0.06em] text-midground/50 px-1">
           {formatMessageTime(message.createdAt)}
         </span>
       )}

@@ -9,7 +9,6 @@ import {
 } from "@assistant-ui/react";
 import type { GatewayClient } from "@/gateway-client";
 import {
-  hasRunningAssistant,
   SessionStore,
   type OurMessage,
   type SessionState,
@@ -17,6 +16,7 @@ import {
 import { getLastHash, setLastHash } from "@/runtime/resume";
 import { createAttachmentAdapter } from "@/runtime/attachment-adapter";
 import { ERR_ID_PREFIX } from "@/constants";
+import { previewText } from "@/lib/preview";
 
 export type ConnState =
   | { kind: "idle" }
@@ -62,6 +62,14 @@ export function useSessionRuntime(
 
   const state = useSyncExternalStore(store.subscribe, store.getSnapshot);
   const [conn, setConn] = useState<ConnState>({ kind: "idle" });
+
+  // On gateway.resync, bump an epoch so the connect effect re-runs (refetch +
+  // reopen) instead of leaving an empty thread with a stuck banner. Bumps once
+  // per resync — the connect effect's store.reset clears resyncing.
+  const [resyncEpoch, setResyncEpoch] = useState(0);
+  useEffect(() => {
+    if (state.resyncing) setResyncEpoch((n) => n + 1);
+  }, [state.resyncing]);
 
   useEffect(() => {
     store.setArchived(archived);
@@ -127,7 +135,7 @@ export function useSessionRuntime(
       cancelled = true;
       ac.abort();
     };
-  }, [client, sessionId, archived, store]);
+  }, [client, sessionId, archived, store, resyncEpoch]);
 
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
@@ -136,23 +144,6 @@ export function useSessionRuntime(
     return () => window.clearInterval(id);
   }, [state.typingTs]);
   const isTyping = state.typingTs > 0 && now - state.typingTs < TYPING_MS;
-  const isRunningRaw = isTyping || hasRunningAssistant(state);
-
-  // Keep isRunning sticky for a short window after each "raw" signal so that
-  // brief gaps (typing → message.edit finalize → next typing) don't flicker
-  // false→true repeatedly. Without this, assistant-ui re-emits thread.runStart
-  // on every flicker and the Viewport's autoScroll snaps the user back to the
-  // bottom on every chunk — breaking manual scroll-up during a stream.
-  const [stickyRunning, setStickyRunning] = useState(false);
-  useEffect(() => {
-    if (isRunningRaw) {
-      setStickyRunning(true);
-      return;
-    }
-    const id = window.setTimeout(() => setStickyRunning(false), 1500);
-    return () => window.clearTimeout(id);
-  }, [isRunningRaw]);
-  const runtimeRunning = stickyRunning;
 
   const cancelRun = async () => {
     if (!sessionId) return;
@@ -172,7 +163,11 @@ export function useSessionRuntime(
   const runtime = useExternalStoreRuntime<OurMessage>({
     messages: state.messages,
     convertMessage,
-    isRunning: runtimeRunning,
+    // Always report not-running so ComposerPrimitive.Send stays enabled even
+    // while the agent is mid-stream. The actual "is the agent active right
+    // now?" check happens inline in onNew below, where we implicitly /stop
+    // the active run before sending a plain message.
+    isRunning: false,
     isDisabled: archived || !sessionId,
     isSendDisabled: conn.kind !== "connected",
     adapters: { attachments: attachmentAdapter },
@@ -186,13 +181,37 @@ export function useSessionRuntime(
         .map((a) => a.id)
         .filter((id): id is string => typeof id === "string" && !id.startsWith(ERR_ID_PREFIX));
       if (!text.trim() && attachments.length === 0) return;
+
+      // If the agent is still active and the user typed a plain message
+      // (no leading "/command"), implicitly cancel the active run first.
+      // A "/foo" command is forwarded as-is so the gateway can route it
+      // (e.g. /undo, /usage) without us short-circuiting the stream.
+      const isSlashCommand = text.trim().startsWith("/");
+      const activeStreamId = store.getSnapshot().currentStreamId;
+      if (activeStreamId && !isSlashCommand) {
+        await cancelRun();
+      }
+
+      // Reply context is sent as a plain text prefix so the agent sees it as
+      // part of the user's prompt; the structured `reply_to` field is left
+      // unused on purpose so the agent can't bind back to an earlier turn.
+      let outboundText = text;
+      if (replyTo) {
+        const replied = store.getSnapshot().messages.find((m) => m.id === replyTo);
+        if (replied?.content) {
+          outboundText = `REPLY TO: ${previewText(replied.content)}\n\n${text}`;
+        }
+      }
+
       onReplySent?.();
       const gen = client.sendMessage(sessionId, {
-        text,
+        text: outboundText,
         attachments,
-        reply_to: replyTo ?? undefined,
       });
       for await (const env of gen) {
+        // Session switched mid-stream: stop draining into the now-reset store
+        // (seq dedupe can't help once lastSeq was reset).
+        if (sidRef.current !== sessionId) break;
         store.applyEvent(env);
         if (env.hash) setLastHash(sessionId, env.hash);
       }

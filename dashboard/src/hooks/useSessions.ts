@@ -9,6 +9,7 @@ export interface UseSessionsResult {
   error: string | null;
   refresh: () => Promise<void>;
   createSession: (name?: string) => Promise<SessionInfo | null>;
+  archiveSession: (sessionId: string) => Promise<boolean>;
 }
 
 export function useSessions(client: GatewayClient): UseSessionsResult {
@@ -46,5 +47,23 @@ export function useSessions(client: GatewayClient): UseSessionsResult {
     [client, refresh],
   );
 
-  return { sessions, loading, error, refresh, createSession };
+  const archiveSession = useCallback(
+    async (sessionId: string) => {
+      // Optimistically drop the row so the click feels instant; refresh
+      // reconciles with the gateway's hash chain.
+      setSessions((prev) => prev.filter((s) => s.session_id !== sessionId));
+      try {
+        await client.archiveSession(sessionId);
+        await refresh();
+        return true;
+      } catch (exc) {
+        setError(errorMessage(exc));
+        await refresh();
+        return false;
+      }
+    },
+    [client, refresh],
+  );
+
+  return { sessions, loading, error, refresh, createSession, archiveSession };
 }

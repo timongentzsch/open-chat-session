@@ -178,7 +178,7 @@ export interface HistoryResponse {
   next_cursor?: Hash;
 }
 
-// --- Push delivery (Phase 4) ---
+// --- Push delivery ---
 
 export type PushPlatform =
   | "web"

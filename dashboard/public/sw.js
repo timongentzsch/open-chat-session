@@ -55,14 +55,26 @@ function updateBadge(badge) {
 async function focusOrOpen(target) {
   const wins = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
   for (const client of wins) {
+    let isChat = false;
     try {
-      if (new URL(client.url).pathname !== CHAT_URL) continue;
-      await client.focus();
-      if (client.navigate) await client.navigate(target).catch(() => undefined);
-      return;
+      isChat = new URL(client.url).pathname === CHAT_URL;
     } catch (_) {
-      // ignore malformed URLs
+      continue; // ignore malformed URLs
     }
+    if (!isChat) continue;
+    // Focus then navigate. Dashboard clients are uncontrolled (page is outside
+    // SW scope) so navigate() may reject — fall through to openWindow so the
+    // ?resume=<session> deep link is honored rather than dropped.
+    try {
+      await client.focus();
+      if (client.navigate) {
+        await client.navigate(target);
+        return;
+      }
+    } catch (_) {
+      // focus/navigate not permitted on this client; open a fresh window.
+    }
+    break;
   }
   await self.clients.openWindow(target);
 }

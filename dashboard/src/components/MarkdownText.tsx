@@ -7,6 +7,32 @@ import type { ExtraProps } from "streamdown";
 import type { ComponentPropsWithoutRef } from "react";
 import { MARKDOWN_COLOR_CSS } from "@/chat-styles";
 
+// Render every "\n" inside markdown text as a hard <br>. Without this,
+// single newlines collapse to a space (CommonMark default) and the agent's
+// tool-call log — one call per line — renders as one long mashed-up
+// paragraph. Walks the remark AST and replaces text nodes that contain
+// "\n" with alternating text + break nodes. Code blocks (no children) and
+// inline code are untouched.
+function remarkHardBreaks() {
+  type AstNode = { type: string; value?: string; children?: AstNode[] };
+  const walk = (node: AstNode) => {
+    if (!node.children) return;
+    for (let i = node.children.length - 1; i >= 0; i--) {
+      const child = node.children[i];
+      walk(child);
+      if (child.type !== "text" || typeof child.value !== "string" || !child.value.includes("\n")) continue;
+      const parts = child.value.split("\n");
+      const replacement: AstNode[] = [];
+      parts.forEach((part, idx) => {
+        if (part) replacement.push({ type: "text", value: part });
+        if (idx < parts.length - 1) replacement.push({ type: "break" });
+      });
+      node.children.splice(i, 1, ...replacement);
+    }
+  };
+  return (tree: AstNode) => walk(tree);
+}
+
 const md = {
   h1: "mb-2 text-base font-semibold first:mt-0 last:mb-0",
   h2: "mb-1.5 mt-3 text-sm font-semibold first:mt-0 last:mb-0",
@@ -80,11 +106,12 @@ const components = {
 export const MarkdownText = React.memo(function MarkdownText() {
   return (
     <>
-      <style precedence="default">{MARKDOWN_COLOR_CSS}</style>
+      <style href="ocs-style-markdown-color" precedence="default">{MARKDOWN_COLOR_CSS}</style>
       <StreamdownTextPrimitive
         className={cn("ocs-markdown min-w-0 break-words text-foreground")}
         components={components}
         controls={false}
+        remarkPlugins={[remarkHardBreaks]}
       />
     </>
   );

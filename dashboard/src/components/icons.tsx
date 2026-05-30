@@ -118,6 +118,19 @@ export function MicIcon({ size = 14 }: { size?: number }) {
   );
 }
 
+export function SendIcon({ size = 14 }: { size?: number }) {
+  return (
+    <svg
+      width={size} height={size} viewBox="0 0 24 24" fill="none"
+      stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M22 2 11 13" />
+      <path d="m22 2-7 20-4-9-9-4 20-7Z" />
+    </svg>
+  );
+}
+
 export function StopRecordIcon({ size = 12 }: { size?: number }) {
   return (
     <svg

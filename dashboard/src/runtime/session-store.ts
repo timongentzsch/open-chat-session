@@ -109,8 +109,6 @@ function isMidStream(content: string | undefined, ts: number): boolean {
 export class SessionStore {
   private state: SessionState = initialSessionState();
   private listeners = new Set<() => void>();
-  private streamMessages = new Map<StreamId, string>();
-  private messageChunks = new Map<string, Map<string, string>>();
   private blockedStreams = new Set<StreamId>();
   private closedStreams = new Set<StreamId>();
   private approvalStreams = new Map<ToolCallId, StreamId>();
@@ -132,8 +130,6 @@ export class SessionStore {
 
   private resetState(initialArchived = false): void {
     this.state = { ...initialSessionState(), archived: initialArchived };
-    this.streamMessages.clear();
-    this.messageChunks.clear();
     this.blockedStreams.clear();
     this.closedStreams.clear();
     this.approvalStreams.clear();
@@ -201,8 +197,8 @@ export class SessionStore {
       case "gateway.message.out": {
         const ge = env as EventEnvelope & GatewayEvent & { kind: "gateway.message.out" };
         const p: MessageOutPayload = ge.payload;
-        const id = this.messageIdForStream(env, p.message_id);
-        const content = this.mergeMessageChunk(id, p.message_id, p.content ?? "");
+        const id = p.message_id;
+        const content = p.content ?? "";
         const finalized = !isMidStream(content, env.ts);
         if (env.stream_id) this.closedStreams.delete(env.stream_id);
         this.upsertMessage({
@@ -219,8 +215,8 @@ export class SessionStore {
       case "gateway.message.edit": {
         const ge = env as EventEnvelope & GatewayEvent & { kind: "gateway.message.edit" };
         const p: MessageEditPayload = ge.payload;
-        const id = this.messageIdForStream(env, p.message_id);
-        const content = this.mergeMessageChunk(id, p.message_id, p.content ?? "");
+        const id = p.message_id;
+        const content = p.content ?? "";
         const finalized = p.finalize === true
           || (p.finalize !== false && !isMidStream(content, env.ts));
         if (env.stream_id) this.closedStreams.delete(env.stream_id);
@@ -334,27 +330,6 @@ export class SessionStore {
     return this.state.messages.find((m) => m.id === id);
   }
 
-  private messageIdForStream(env: EventEnvelope, fallback: string): string {
-    if (!env.stream_id) return fallback;
-    const existing = this.streamMessages.get(env.stream_id);
-    if (existing) return existing;
-    this.streamMessages.set(env.stream_id, fallback);
-    return fallback;
-  }
-
-  private mergeMessageChunk(messageId: string, chunkId: string, content: string): string {
-    let chunks = this.messageChunks.get(messageId);
-    if (!chunks) {
-      chunks = new Map();
-      this.messageChunks.set(messageId, chunks);
-    }
-    chunks.set(chunkId, content);
-    return [...chunks.values()].reduce((merged, part, index, values) => {
-      const clean = index === values.length - 1 ? part : stripStreamCursor(part);
-      return merged + chunkBoundary(merged, clean) + clean;
-    }, "");
-  }
-
   private mergeAttachments(messageId: string, refs: AttachmentRef[]): void {
     if (refs.length === 0) return;
     const cur = this.state.attachments[messageId] ?? [];
@@ -371,7 +346,6 @@ export class SessionStore {
   }
 
   private applyCancel(streamId: string): void {
-    if (streamId) this.streamMessages.delete(streamId);
     if (streamId) {
       this.blockedStreams.delete(streamId);
       this.closedStreams.add(streamId);
@@ -437,6 +411,7 @@ export class SessionStore {
     if (!existing) return;
     const streamId = this.approvalStreams.get(p.tool_call_id);
     if (streamId) this.blockedStreams.delete(streamId);
+    this.approvalStreams.delete(p.tool_call_id);
     this.set({
       approvals: {
         ...this.state.approvals,
@@ -481,6 +456,7 @@ export class SessionStore {
     if (!p.clarify_id || !this.state.clarifies[p.clarify_id]) return;
     const streamId = this.clarifyStreams.get(p.clarify_id);
     if (streamId) this.blockedStreams.delete(streamId);
+    this.clarifyStreams.delete(p.clarify_id);
     const next = { ...this.state.clarifies };
     delete next[p.clarify_id];
     this.set({ clarifies: next });
@@ -494,12 +470,6 @@ function finishAssistantMessage(m: OurMessage): OurMessage {
 
 function stripStreamCursor(content: string): string {
   return content.endsWith(STREAM_CURSOR_CHAR) ? content.slice(0, -1) : content;
-}
-
-function chunkBoundary(before: string, after: string): string {
-  if (!before || before.endsWith("\n") || after.startsWith("\n")) return "";
-  const openFenceCount = before.match(/```/g)?.length ?? 0;
-  return openFenceCount % 2 === 1 && /^\s+/.test(after) ? "\n" : "";
 }
 
 function normalizeAttachmentRefs(refs: unknown): AttachmentRef[] {
@@ -525,8 +495,4 @@ export function pendingApprovals(s: SessionState): ApprovalView[] {
   return Object.values(s.approvals)
     .filter((a) => a.status === "pending")
     .sort((a, b) => a.requested_at - b.requested_at);
-}
-
-export function hasRunningAssistant(s: SessionState): boolean {
-  return !!s.currentStreamId || s.messages.some((m) => m.role === "assistant" && !m.finalized);
 }

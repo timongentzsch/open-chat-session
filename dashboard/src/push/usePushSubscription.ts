@@ -66,6 +66,18 @@ function b64urlToBytes(b64url: string): ArrayBuffer {
   return buf;
 }
 
+// True only if the existing subscription was created with the same VAPID key
+// we just fetched. A null/unreadable stored key counts as a mismatch so we
+// resubscribe (resubscribing with the current key is harmless).
+function sameAppKey(existing: ArrayBuffer | null | undefined, fetched: ArrayBuffer): boolean {
+  if (!existing) return false;
+  const a = new Uint8Array(existing);
+  const b = new Uint8Array(fetched);
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+}
+
 const DEFAULT_POLICY = {
   message_in: false,
   message_out: true,
@@ -79,9 +91,23 @@ async function activeRegistration(): Promise<ServiceWorkerRegistration> {
   const worker = reg.active || reg.installing || reg.waiting;
   if (!reg.active && worker && worker.state !== "activated") {
     await new Promise<void>((resolve) => {
-      worker.addEventListener("statechange", () => {
-        if (worker.state === "activated") resolve();
-      });
+      let settled = false;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        worker.removeEventListener("statechange", onChange);
+        if (timer !== undefined) clearTimeout(timer);
+        resolve();
+      };
+      const onChange = () => {
+        if (worker.state === "activated" || worker.state === "redundant") finish();
+      };
+      worker.addEventListener("statechange", onChange);
+      timer = setTimeout(finish, 10_000); // fallback so subscribe() can't hang
+      // Re-check after attaching: the worker may have activated in between,
+      // which would otherwise miss the event and hang.
+      if (worker.state === "activated" || worker.state === "redundant") finish();
     });
   }
   return reg;
@@ -126,6 +152,12 @@ export function usePushSubscription(
       const appKey = b64urlToBytes(public_key);
 
       let sub = await reg.pushManager.getSubscription();
+      if (sub && !sameAppKey(sub.options.applicationServerKey, appKey)) {
+        // VAPID key rotated: the old subscription is signed against a retired
+        // key and can't receive deliveries, so drop it and resubscribe.
+        await sub.unsubscribe().catch(() => undefined);
+        sub = null;
+      }
       if (!sub) {
         sub = await reg.pushManager.subscribe({
           userVisibleOnly: true,

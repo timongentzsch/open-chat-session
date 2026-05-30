@@ -5,7 +5,7 @@ export const PWA_SW_URL = `${PWA_BASE}/sw.js`;
 export const PWA_MANIFEST_URL = `${PWA_BASE}/manifest.json`;
 export const PWA_APPLE_TOUCH_ICON_URL = `${PWA_BASE}/icons/180.png`;
 export const CLIENT_DEVICE_ID_HEADER = "X-Open-Chat-Session-Device-Id";
-export const CLIENT_DEVICE_ID_KEY = "ocs:push:device_id";
+const CLIENT_DEVICE_ID_KEY = "ocs:push:device_id";
 
 export const HEALTH_POLL_MS = 15_000;
 export const BLOB_URL_CLEANUP_MS = 30_000;

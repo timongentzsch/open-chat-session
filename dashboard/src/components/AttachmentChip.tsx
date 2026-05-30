@@ -205,14 +205,14 @@ export function AttachmentChip({
       download={!sameOrigin ? name : undefined}
       onClick={handleDownload}
       aria-label={`Download ${name}`}
-      style={{ width: "18rem", maxWidth: "100%" }}
+      style={{ width: "18rem" }}
       className={cn(
-        "inline-flex min-h-14 items-center gap-3 border border-midground/30 bg-background/30 px-3 py-2 text-xs",
+        "inline-flex min-h-14 max-w-full items-center gap-3 border border-midground/30 bg-background/30 px-3 py-2 text-xs",
         "text-midground/80 transition hover:border-midground/50 hover:text-foreground",
         downloadState === "error" && "border-destructive/40 text-destructive",
       )}
     >
-      <style precedence="default">{SURFACE_CSS}</style>
+      <style href="ocs-style-surface" precedence="default">{SURFACE_CSS}</style>
       <span
         aria-hidden
         data-aui-ocs-surface="mid"
