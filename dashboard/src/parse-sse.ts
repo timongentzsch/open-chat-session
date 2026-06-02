@@ -3,6 +3,7 @@
 // concatenated `data:` lines per the spec. Caller closes via AbortSignal.
 // Inline (~30 LOC) instead of a runtime dep.
 
+import { SSE_IDLE_TIMEOUT_MS } from "./constants";
 import { GatewayError } from "./errors";
 
 export interface SSEFrame {
@@ -11,7 +12,34 @@ export interface SSEFrame {
   data: string;
 }
 
-export async function* parseSSE(res: Response): AsyncGenerator<SSEFrame> {
+/**
+ * Read with an idle watchdog. Resolves on the next chunk, or rejects if no
+ * bytes arrive within `idleMs`. Heartbeat (`: ping`) frames count as bytes, so
+ * a live-but-quiet stream never trips it — only a silently-dead socket does.
+ */
+async function readWithIdleTimeout<T>(
+  reader: ReadableStreamDefaultReader<T>,
+  idleMs: number,
+): Promise<ReadableStreamReadResult<T>> {
+  if (idleMs <= 0) return reader.read();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(new GatewayError(504, "stream_idle_timeout", `no SSE data for ${idleMs}ms`)),
+      idleMs,
+    );
+  });
+  try {
+    return await Promise.race([reader.read(), timeout]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+export async function* parseSSE(
+  res: Response,
+  idleMs = SSE_IDLE_TIMEOUT_MS,
+): AsyncGenerator<SSEFrame> {
   if (!res.body) {
     throw new GatewayError(503, "no_body", "SSE response had no body");
   }
@@ -19,18 +47,23 @@ export async function* parseSSE(res: Response): AsyncGenerator<SSEFrame> {
   const decoder = new TextDecoder();
   let buf = "";
 
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) return;
-    buf += decoder.decode(value, { stream: true });
+  try {
+    while (true) {
+      const { value, done } = await readWithIdleTimeout(reader, idleMs);
+      if (done) return;
+      buf += decoder.decode(value, { stream: true });
 
-    let idx: number;
-    while ((idx = buf.indexOf("\n\n")) >= 0) {
-      const block = buf.slice(0, idx);
-      buf = buf.slice(idx + 2);
-      const frame = parseFrame(block);
-      if (frame) yield frame;
+      let idx: number;
+      while ((idx = buf.indexOf("\n\n")) >= 0) {
+        const block = buf.slice(0, idx);
+        buf = buf.slice(idx + 2);
+        const frame = parseFrame(block);
+        if (frame) yield frame;
+      }
     }
+  } finally {
+    // Release the network on idle-timeout throw or caller break/return.
+    void reader.cancel().catch(() => undefined);
   }
 }
 

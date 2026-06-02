@@ -18,9 +18,12 @@ not replace the stock `/chat` page.
 - Native REST + SSE gateway on `127.0.0.1:8765`.
 - Plugin-owned HTTPS-friendly edge on `127.0.0.1:9120` for Tailscale Serve.
 - Reference dashboard UI built from `@assistant-ui/react` headless primitives.
-- Multi-session chat, history replay, live streaming, replies, attachments,
-  typing, slash commands, clarify prompts, exec approvals, cancellation, and
+- Multi-session chat with rename, history replay (forward + backward paging),
+  live streaming, replies, attachments, typing, slash commands, opt-in
+  `@`-context completion, clarify prompts, exec approvals, cancellation, and
   background Web Push.
+- Sessions report their Hermes `SessionDB` id (`sessiondb_id`), so the same
+  conversation is addressable across the dashboard, desktop app, and TUI.
 - Hash-chained per-session `log.db`; blobs stored content-addressed in
   `attachments/`; push subscriptions stored separately in `push.db`.
 - Plugin-contained PWA assets and mobile metadata; no Hermes host edits.
@@ -66,6 +69,9 @@ Useful env overrides:
 - `OPEN_CHAT_SESSION_EDGE_BIND`
 - `OPEN_CHAT_SESSION_EDGE_DASHBOARD_URL`
 - `OPEN_CHAT_SESSION_DATA_DIR`
+- `OPEN_CHAT_SESSION_CONTEXT_COMPLETION` (opt-in `@`-completion; default off)
+- `OPEN_CHAT_SESSION_COMPLETION_CWD` (advanced override for the `@`-completion
+  root; defaults to the agent workspace `terminal.cwd` / `TERMINAL_CWD`)
 
 ## Dashboard Build
 
@@ -95,7 +101,8 @@ Direct clients must send auth and `X-Device-Id` themselves.
 | `GET` | `/sessions/{id}/events` | SSE stream |
 | `POST` | `/sessions/{id}/messages` | send message and stream this run |
 | `POST` | `/sessions/{id}/cancel` | cancel active run and resolve blockers |
-| `GET` | `/sessions/{id}/history` | event replay |
+| `GET` | `/sessions/{id}/history` | event replay (`?after=` forward, `?before=` backward) |
+| `GET` | `/sessions/{id}/complete` | `@`-reference completions (opt-in — see Context Completion) |
 | `POST` | `/sessions/{id}/attachments` | multipart upload |
 | `GET` | `/sessions/{id}/attachments/{aid}` | download |
 | `POST` | `/sessions/{id}/approvals/{tool_call_id}` | answer approval |
@@ -104,6 +111,21 @@ Direct clients must send auth and `X-Device-Id` themselves.
 
 SSE events use the event hash as `id`; clients should dedupe by `hash` and
 ignore unknown `kind` values.
+
+## Context Completion
+
+`@`-references (`@file:src/app.ts`, `@diff`, `@staged`, `@git:`, `@folder:`) are
+completed server-side against the **agent workspace** (`terminal.cwd` /
+`TERMINAL_CWD`) — the same root the agent resolves `@file:` against, shared by
+all sessions (Hermes has no per-session workspace; scope it per profile).
+
+**Off by default** — enabling it exposes that workspace's tree and git history to
+every allowlisted Tailscale peer. Enable with
+`OPEN_CHAT_SESSION_CONTEXT_COMPLETION=1`; `/health` reports `context_completion`
+so clients can gate the affordance. `OPEN_CHAT_SESSION_COMPLETION_CWD` is an
+advanced override (may diverge from where the agent reads). Picked refs are
+inserted as plain `@type:value` text the agent resolves; `@url:`/`@image:`/
+`@tool:` are not served.
 
 ## Push
 

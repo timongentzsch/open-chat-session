@@ -11,6 +11,7 @@ function pillText(conn: ConnState, _platform?: string, healthError?: string | nu
     case "connecting": return "connecting";
     case "connected": return healthError ? "live · stale" : "live";
     case "reconnecting": return `retry ${Math.round(conn.nextDelayMs / 1000)}s`;
+    case "unauthorized": return "auth";
     default: {
       const _exhaustive: never = conn;
       return "";
@@ -27,7 +28,7 @@ export function ConnectionPill({
   platform?: string;
   healthError?: string | null;
 }) {
-  const title = conn.kind === "reconnecting"
+  const title = conn.kind === "reconnecting" || conn.kind === "unauthorized"
     ? conn.lastError
     : healthError
       ? `health check failed: ${healthError}`

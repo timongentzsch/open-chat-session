@@ -10,6 +10,7 @@ export interface UseSessionsResult {
   refresh: () => Promise<void>;
   createSession: (name?: string) => Promise<SessionInfo | null>;
   archiveSession: (sessionId: string) => Promise<boolean>;
+  renameSession: (sessionId: string, name: string) => Promise<boolean>;
 }
 
 export function useSessions(client: GatewayClient): UseSessionsResult {
@@ -65,5 +66,25 @@ export function useSessions(client: GatewayClient): UseSessionsResult {
     [client, refresh],
   );
 
-  return { sessions, loading, error, refresh, createSession, archiveSession };
+  const renameSession = useCallback(
+    async (sessionId: string, name: string) => {
+      // Optimistically swap the label so the edit feels instant; refresh
+      // reconciles with the gateway's hash chain.
+      setSessions((prev) =>
+        prev.map((s) => (s.session_id === sessionId ? { ...s, name } : s)),
+      );
+      try {
+        await client.renameSession(sessionId, name);
+        await refresh();
+        return true;
+      } catch (exc) {
+        setError(errorMessage(exc));
+        await refresh();
+        return false;
+      }
+    },
+    [client, refresh],
+  );
+
+  return { sessions, loading, error, refresh, createSession, archiveSession, renameSession };
 }

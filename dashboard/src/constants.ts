@@ -9,6 +9,9 @@ const CLIENT_DEVICE_ID_KEY = "ocs:push:device_id";
 
 export const HEALTH_POLL_MS = 15_000;
 export const BLOB_URL_CLEANUP_MS = 30_000;
+// SSE liveness watchdog: no bytes (data or the ~20s heartbeat) for this long
+// means a silently-dead socket — abort and let the reconnect loop re-open.
+export const SSE_IDLE_TIMEOUT_MS = 45_000;
 
 export const DEFAULT_BACKFILL_COUNT = 200;
 export const ERR_ID_PREFIX = "err-";

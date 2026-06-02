@@ -1,4 +1,4 @@
-import { React, cn, useEffect, useMemo, useRef, useState } from "@/sdk";
+import { React, cn, useCallback, useEffect, useMemo, useRef, useState } from "@/sdk";
 import {
   ActionBarPrimitive,
   AuiIf,
@@ -56,6 +56,12 @@ export interface ChatThreadProps {
   showTyping?: boolean;
   emptyHint?: string;
   footer?: React.ReactNode;
+  /** Older history exists above the loaded window (scroll-up paging). */
+  hasOlder?: boolean;
+  loadingOlder?: boolean;
+  /** Fetch + prepend the previous page; `beforePrepend` fires right before the
+   *  prepend so we can snapshot scroll position to keep the viewport anchored. */
+  onLoadOlder?: (beforePrepend: () => void) => void;
 }
 
 function ToolFallbackPart({ part }: { part: Extract<EnrichedPartState, { type: "tool-call" }> }) {
@@ -100,6 +106,9 @@ export function ChatThread({
   showTyping = false,
   emptyHint,
   footer,
+  hasOlder = false,
+  loadingOlder = false,
+  onLoadOlder,
 }: ChatThreadProps) {
   const pendingList = pendingApprovals ?? [];
   const clarifyList = pendingClarifies ?? [];
@@ -144,9 +153,69 @@ export function ChatThread({
     };
   }, []);
 
+  // Scroll-up paging. Right before the prepend we snapshot distance-from-bottom,
+  // then hold the viewport pinned to it while the prepended page settles its
+  // (async markdown) height above, so the user stays on the same message.
+  // Driven by a MutationObserver plus timed re-applies; released on user scroll
+  // or after the cap. `pinning` suppresses the load-trigger during that window
+  // (programmatic scrollTop writes would otherwise re-fire it).
+  const pinningRef = useRef(false);
+  const beforePrepend = useCallback(() => {
+    const vp = viewportRef.current;
+    if (!vp) return;
+    const pinDist = vp.scrollHeight - vp.scrollTop;
+    pinningRef.current = true;
+    let cancelled = false;
+    let quietTimer = 0;
+    let capTimer = 0;
+    const stop = () => {
+      cancelled = true;
+      pinningRef.current = false;
+      mo.disconnect();
+      clearTimeout(quietTimer);
+      clearTimeout(capTimer);
+      vp.removeEventListener("wheel", stop);
+      vp.removeEventListener("touchstart", stop);
+    };
+    const apply = () => {
+      const v = viewportRef.current;
+      if (cancelled || !v) return;
+      v.scrollTop = v.scrollHeight - pinDist;
+      // Release once the content has been quiet (settled) for a beat.
+      clearTimeout(quietTimer);
+      quietTimer = window.setTimeout(stop, 300);
+    };
+    const mo = new MutationObserver(apply);
+    mo.observe(vp, { childList: true, subtree: true, characterData: true });
+    vp.addEventListener("wheel", stop, { passive: true });
+    vp.addEventListener("touchstart", stop, { passive: true });
+    apply();
+    capTimer = window.setTimeout(stop, 5000);
+  }, []);
+
+  useEffect(() => {
+    const vp = viewportRef.current;
+    if (!vp || !onLoadOlder) return;
+    const TRIGGER_PX = 200;
+    const onScroll = () => {
+      if (!pinningRef.current && hasOlder && !loadingOlder && vp.scrollTop < TRIGGER_PX) {
+        onLoadOlder(beforePrepend);
+      }
+    };
+    vp.addEventListener("scroll", onScroll, { passive: true });
+    return () => vp.removeEventListener("scroll", onScroll);
+  }, [hasOlder, loadingOlder, onLoadOlder, beforePrepend]);
+
   return (
-    <ThreadPrimitive.Root className="flex min-h-0 flex-1 flex-col">
+    <ThreadPrimitive.Root className="relative flex min-h-0 flex-1 flex-col">
       <style href="ocs-style-bubble-spacing" precedence="default">{BUBBLE_AND_SPACING_CSS}</style>
+      {loadingOlder && (
+        <div className="pointer-events-none absolute inset-x-0 top-0 z-20 flex justify-center py-1.5">
+          <span className="border border-midground/30 bg-background px-2 py-0.5 font-mondwest text-[10px] uppercase tracking-[0.12em] text-midground/60">
+            loading older…
+          </span>
+        </div>
+      )}
       <ThreadPrimitive.Viewport
         ref={viewportRef}
         autoScroll

@@ -13,6 +13,8 @@ import {
 import { parseSSE } from "./parse-sse";
 import type {
   AttachmentInfo,
+  CompletionItem,
+  CompletionResponse,
   CreateSessionRequest,
   EventEnvelope,
   Hash,
@@ -26,6 +28,17 @@ import type {
   StreamId,
   VapidPublicKeyResponse,
 } from "./types";
+
+// Retry idempotent GETs on transient failures only; 4xx are deterministic.
+const IDEMPOTENT_RETRIES = 3;
+
+function isTransient(exc: unknown): boolean {
+  return exc instanceof GatewayError ? exc.status >= 500 : true;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
 
 type ErrorBody = {
   error?: { code?: string; message?: string };
@@ -102,6 +115,20 @@ export class GatewayClient {
     return fetch(this.url(path, params), this.auth(init)).then((res) => this.json<T>(res));
   }
 
+  private async withRetry<T>(fn: () => Promise<T>): Promise<T> {
+    let lastErr: unknown;
+    for (let i = 0; i < IDEMPOTENT_RETRIES; i++) {
+      try {
+        return await fn();
+      } catch (exc) {
+        lastErr = exc;
+        if (!isTransient(exc) || i === IDEMPOTENT_RETRIES - 1) throw exc;
+        await sleep(250 * 2 ** i);
+      }
+    }
+    throw lastErr;
+  }
+
   private async requestVoid(path: string, fallbackCode: string, init?: RequestInit): Promise<void> {
     const res = await fetch(this.url(path), this.auth(init));
     await this.expect(res, fallbackCode);
@@ -138,16 +165,27 @@ export class GatewayClient {
   }
 
   health(): Promise<HealthResponse> {
-    return this.request<HealthResponse>("/health");
+    return this.withRetry(() => this.request<HealthResponse>("/health"));
   }
 
   async listSessions(opts: { includeArchived?: boolean } = {}): Promise<SessionInfo[]> {
-    const body = await this.request<SessionsListResponse>(
+    const body = await this.withRetry(() => this.request<SessionsListResponse>(
       "/sessions",
       undefined,
       { include_archived: opts.includeArchived ?? false },
-    );
+    ));
     return body.sessions ?? [];
+  }
+
+  // `@`-reference completions, backed server-side by the gateway's
+  // complete.path RPC. `word` is the raw trigger token incl. the leading `@`.
+  async complete(sessionId: string, word: string): Promise<CompletionItem[]> {
+    const body = await this.request<CompletionResponse>(
+      `/sessions/${encodeURIComponent(sessionId)}/complete`,
+      undefined,
+      { word },
+    );
+    return body.items ?? [];
   }
 
   createSession(req: CreateSessionRequest): Promise<SessionInfo> {
@@ -155,6 +193,14 @@ export class GatewayClient {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(req),
+    });
+  }
+
+  renameSession(sessionId: string, name: string): Promise<SessionInfo> {
+    return this.request<SessionInfo>(`/sessions/${encodeURIComponent(sessionId)}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name }),
     });
   }
 
@@ -168,16 +214,17 @@ export class GatewayClient {
 
   async history(
     sessionId: string,
-    opts: { after?: string; limit?: number } = {},
+    opts: { after?: string; before?: string; limit?: number } = {},
   ): Promise<HistoryResponse> {
-    const body = await this.request<{ events: unknown[]; next_cursor?: Hash }>(
+    const body = await this.withRetry(() => this.request<{ events: unknown[]; next_cursor?: Hash; prev_cursor?: Hash }>(
       `/sessions/${encodeURIComponent(sessionId)}/history`,
       undefined,
-      { after: opts.after, limit: opts.limit ?? 100 },
-    );
+      { after: opts.after, before: opts.before, limit: opts.limit ?? 100 },
+    ));
     return {
       events: (body.events ?? []).filter(isEventEnvelope),
       next_cursor: body.next_cursor,
+      prev_cursor: body.prev_cursor,
     };
   }
 

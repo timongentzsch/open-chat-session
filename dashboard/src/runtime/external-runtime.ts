@@ -1,6 +1,6 @@
 // Bridges the gateway event store into assistant-ui's ExternalStoreRuntime.
 
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "@/sdk";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "@/sdk";
 import {
   AssistantRuntimeProvider,
   useExternalStoreRuntime,
@@ -8,12 +8,12 @@ import {
   type ThreadMessageLike,
 } from "@assistant-ui/react";
 import type { GatewayClient } from "@/gateway-client";
+import { GatewayError } from "@/errors";
 import {
   SessionStore,
   type OurMessage,
   type SessionState,
 } from "@/runtime/session-store";
-import { getLastHash, setLastHash } from "@/runtime/resume";
 import { createAttachmentAdapter } from "@/runtime/attachment-adapter";
 import { ERR_ID_PREFIX } from "@/constants";
 import { previewText } from "@/lib/preview";
@@ -22,7 +22,8 @@ export type ConnState =
   | { kind: "idle" }
   | { kind: "connecting" }
   | { kind: "connected" }
-  | { kind: "reconnecting"; nextDelayMs: number; lastError: string };
+  | { kind: "reconnecting"; nextDelayMs: number; lastError: string }
+  | { kind: "unauthorized"; lastError: string };
 
 export interface UseSessionRuntimeResult {
   state: SessionState;
@@ -30,6 +31,12 @@ export interface UseSessionRuntimeResult {
   runtime: ReturnType<typeof useExternalStoreRuntime>;
   conn: ConnState;
   isTyping: boolean;
+  /** True when older history exists above the loaded window (scroll-up paging). */
+  hasOlder: boolean;
+  loadingOlder: boolean;
+  /** Fetch + prepend the previous page. `beforePrepend` fires synchronously
+   *  right before the prepend so the caller can snapshot scroll position. */
+  loadOlder: (beforePrepend?: () => void) => Promise<void>;
 }
 
 const TYPING_MS = 5000;
@@ -84,7 +91,6 @@ export function useSessionRuntime(
     let cancelled = false;
     const ac = new AbortController();
     let attempt = 0;
-    let hydrated = false;
     store.reset(archived);
 
     async function run() {
@@ -95,17 +101,11 @@ export function useSessionRuntime(
             : { kind: "reconnecting", nextDelayMs: backoff(attempt), lastError: "reconnecting" },
         );
         try {
-          if (!hydrated) {
-            // History may 404 on first connect; live cursor=latest backfills.
-            try {
-              const h = await client.history(sessionId!, { limit: 200 });
-              store.loadHistory([...h.events].sort((a, b) => a.seq - b.seq), archived);
-            } catch { /* tolerated */ }
-            hydrated = true;
-          }
-          const tipHash = store.getSnapshot().lastHash || getLastHash(sessionId!);
-          const cursor = tipHash
-            ? { lastEventId: tipHash }
+          // Fresh load → tail (latest N) so a long conversation opens at its
+          // newest messages; a reconnect resumes from the in-memory tip.
+          const tip = store.getSnapshot().lastHash;
+          const cursor = tip
+            ? { lastEventId: tip }
             : { cursor: "latest" as const, latestN: 200 };
           const gen = client.streamEvents(sessionId!, cursor, ac.signal);
           setConn({ kind: "connected" });
@@ -113,11 +113,19 @@ export function useSessionRuntime(
           for await (const env of gen) {
             if (cancelled) break;
             store.applyEvent(env);
-            if (env.hash) setLastHash(sessionId!, env.hash);
           }
           if (cancelled) break;
         } catch (exc) {
           if (cancelled || (exc instanceof DOMException && exc.name === "AbortError")) break;
+          // Auth failures won't recover by retrying — surface and stop.
+          if (exc instanceof GatewayError && (exc.status === 401 || exc.status === 403)) {
+            const msg = exc.status === 401
+              ? "Session expired — reload to re-authenticate."
+              : "Access denied for this device.";
+            store.setError(msg);
+            setConn({ kind: "unauthorized", lastError: msg });
+            break;
+          }
           attempt += 1;
           const delay = backoff(attempt);
           setConn({
@@ -151,6 +159,27 @@ export function useSessionRuntime(
     store.cancelActive(streamId);
     await client.cancelStream(sessionId, streamId);
   };
+
+  const hasOlder = state.firstSeq > 1;
+  const [loadingOlder, setLoadingOlder] = useState(false);
+  const loadingOlderRef = useRef(false);
+  const loadOlder = useCallback(async (beforePrepend?: () => void) => {
+    const snap = store.getSnapshot();
+    if (loadingOlderRef.current || !sessionId || !snap.firstHash || snap.firstSeq <= 1) return;
+    loadingOlderRef.current = true;
+    setLoadingOlder(true);
+    try {
+      const h = await client.history(sessionId, { before: snap.firstHash, limit: 200 });
+      if (h.events.length > 0) {
+        beforePrepend?.();
+        store.prependHistory([...h.events].sort((a, b) => a.seq - b.seq));
+      }
+    } catch { /* tolerated — user can retry by scrolling */ }
+    finally {
+      loadingOlderRef.current = false;
+      setLoadingOlder(false);
+    }
+  }, [client, sessionId, store]);
 
   // Adapter stays stable across re-renders; sessionId read via ref.
   const sidRef = useRef(sessionId);
@@ -213,7 +242,6 @@ export function useSessionRuntime(
         // (seq dedupe can't help once lastSeq was reset).
         if (sidRef.current !== sessionId) break;
         store.applyEvent(env);
-        if (env.hash) setLastHash(sessionId, env.hash);
       }
     },
     onCancel: async () => {
@@ -221,7 +249,7 @@ export function useSessionRuntime(
     },
   });
 
-  return { state, store, runtime, conn, isTyping };
+  return { state, store, runtime, conn, isTyping, hasOlder, loadingOlder, loadOlder };
 }
 
 export { AssistantRuntimeProvider };

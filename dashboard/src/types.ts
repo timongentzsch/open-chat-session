@@ -23,6 +23,8 @@ export interface SessionInfo {
   tip_seq?: number;
   tip_hash?: Hash;
   event_count?: number;
+  /** Hermes SessionDB id for the same conversation (identity bridge). */
+  sessiondb_id?: string;
 }
 
 export interface AttachmentRef {
@@ -163,10 +165,25 @@ export interface SendMessageRequest {
   metadata?: JsonObject;
 }
 
-// The gateway sends additional fields; the dashboard only reads `platform`.
+// The gateway sends additional fields; the dashboard reads `platform` and the
+// optional `context_completion` capability flag (gates the `@` composer menu).
 export interface HealthResponse {
   ok: true;
   platform: "open_chat_session";
+  context_completion?: boolean;
+}
+
+// One `@`-reference completion candidate, mirroring the gateway's
+// complete.path item shape. `text` is the canonical directive inserted into
+// the message (e.g. `@file:src/app.ts`); `display`/`meta` are labels only.
+export interface CompletionItem {
+  text: string;
+  display?: string;
+  meta?: string;
+}
+
+export interface CompletionResponse {
+  items: CompletionItem[];
 }
 
 export interface SessionsListResponse {
@@ -176,6 +193,7 @@ export interface SessionsListResponse {
 export interface HistoryResponse {
   events: EventEnvelope[];
   next_cursor?: Hash;
+  prev_cursor?: Hash;
 }
 
 // --- Push delivery ---

@@ -49,6 +49,7 @@ export const PILL_TONES: Record<ConnState["kind"], string> = {
   connecting: toneClass("warning"),
   connected: toneClass("success"),
   reconnecting: "text-warning/80",
+  unauthorized: toneClass("destructive"),
 };
 
 export const BANNER_TEXT_TONES: Record<BannerTone, string> = {

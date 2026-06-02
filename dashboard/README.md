@@ -59,7 +59,14 @@ bearer token, injects a stable `X-Device-Id`, and streams SSE without buffering.
 
 ## Notes
 
-Slash commands use assistant-ui trigger popover primitives with an internal
-scroll area. The UI should inherit Hermes dashboard tokens (`background`,
-`foreground-base`, `midground`, `success`, `warning`, `destructive`) instead of
-hard-coded palette colors.
+- Slash (`/`) and `@`-context completion share one assistant-ui trigger-popover
+  item (`PopoverItem` in `Composer.tsx`); `@` is gated on `health.context_completion`.
+- History hydrates from the tail (`cursor=latest`) so long threads open at the
+  newest message; scrolling near the top loads the previous page and pins the
+  viewport to its distance-from-bottom so the prepend doesn't jump.
+- Streaming follows the bottom only when the user is already there (assistant-ui
+  `autoScroll`); an SSE liveness watchdog (`parse-sse.ts`) reconnects a silently
+  dead stream by `Last-Event-ID`, idempotent GETs retry, and a `401`/`403`
+  surfaces a terminal "session expired" state.
+- The UI should inherit Hermes dashboard tokens (`background`, `foreground-base`,
+  `midground`, `success`, `warning`, `destructive`) instead of hard-coded colors.

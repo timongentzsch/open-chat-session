@@ -291,6 +291,66 @@ async def _body_json(request) -> dict:
         raise web.HTTPBadRequest(reason="invalid JSON body") from exc
 
 
+# Skip url completions (network fetch). @image:/@tool: aren't emitted by the
+# gateway's complete.path, so they need no entry here.
+_COMPLETION_BLOCKED_PREFIXES = ("@url:",)
+
+
+def _filter_completion_items(items: list) -> list[dict]:
+    out: list[dict] = []
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        text = it.get("text", "")
+        if isinstance(text, str) and text.startswith(_COMPLETION_BLOCKED_PREFIXES):
+            continue
+        out.append(it)
+    return out
+
+
+def _ocs_to_sessiondb_map() -> dict[str, str]:
+    """Map OCS session_id -> Hermes SessionDB id via the runner's session_key
+    index (sessions.json). Read-only, best-effort: the OCS id is embedded in
+    the key as ``…:open_chat_session:group:s_<id>[:suffix]``."""
+    out: dict[str, str] = {}
+    try:
+        from hermes_constants import get_hermes_home
+        path = get_hermes_home() / "sessions" / "sessions.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return out
+    marker = ":open_chat_session:group:"
+    for key, entry in data.items():
+        if marker not in key or not isinstance(entry, dict):
+            continue
+        ocs_id = key.split(marker, 1)[1].split(":", 1)[0]
+        sid = entry.get("session_id")
+        if ocs_id and sid:
+            out[ocs_id] = sid
+    return out
+
+
+def _complete_path_sync(word: str, cwd: str = "") -> list[dict]:
+    """Call the gateway's `complete.path` RPC in-process. Blocking (git +
+    os.walk) — call via ``asyncio.to_thread``. With no `cwd`, the gateway
+    resolves against the agent workspace (TERMINAL_CWD)."""
+    # Imported lazily so tui_gateway.server's import-time side effects only load
+    # when @-completion is used; the module cache makes re-imports cheap.
+    from tui_gateway.server import handle_request
+    params: dict = {"word": word}
+    if cwd:
+        params["cwd"] = cwd
+    res = handle_request({
+        "jsonrpc": "2.0",
+        "id": "ocs-complete",
+        "method": "complete.path",
+        "params": params,
+    })
+    result = res.get("result") if isinstance(res, dict) else None
+    items = result.get("items") if isinstance(result, dict) else None
+    return _filter_completion_items(items) if isinstance(items, list) else []
+
+
 # ---------------------------------------------------------------------------
 # SessionInfo
 # ---------------------------------------------------------------------------
@@ -471,6 +531,19 @@ class HashChainedLog:
             (session_id, after_seq, limit),
         )
         return [self._row_to_event(session_id, r) for r in cur]
+
+    def range_before(self, session_id: str, before_seq: int,
+                     limit: int = LOG_PAGE_LIMIT) -> list[dict]:
+        """The ``limit`` events immediately before ``before_seq``, ascending."""
+        cur = self._db.execute(
+            "SELECT seq, prev_hash, hash, stream_id, kind, data, ts "
+            "FROM events WHERE session_id=? AND seq < ? "
+            "ORDER BY seq DESC LIMIT ?",
+            (session_id, before_seq, limit),
+        )
+        rows = [self._row_to_event(session_id, r) for r in cur]
+        rows.reverse()
+        return rows
 
     def iter_after(self, session_id: str, after_seq: int = 0):
         """Yield every event after ``after_seq`` in seq order, paging internally
@@ -1583,6 +1656,16 @@ class OpenChatSessionAdapter(BasePlatformAdapter):
             extra, "auto_create_default_session",
             "OPEN_CHAT_SESSION_AUTO_DEFAULT_SESSION", default=True,
         )
+        # Off by default: serves the host's filesystem/git tree to any
+        # allowlisted tailnet peer. `completion_cwd` pins the root (default cwd).
+        self._context_completion = _conf_bool(
+            extra, "context_completion",
+            "OPEN_CHAT_SESSION_CONTEXT_COMPLETION", default=False,
+        )
+        self._completion_cwd = _conf_str(
+            extra, "context_completion_cwd",
+            "OPEN_CHAT_SESSION_COMPLETION_CWD",
+        )
 
         self._log = HashChainedLog(self._data_dir / "log.db")
         self._sessions = SessionRegistry(self._log)
@@ -1682,6 +1765,7 @@ class OpenChatSessionAdapter(BasePlatformAdapter):
         r.add_get("/sessions/{session_id}/attachments/{attachment_id}",
                   self._handle_attachment_download)
         r.add_get("/sessions/{session_id}/history", self._handle_history)
+        r.add_get("/sessions/{session_id}/complete", self._handle_complete)
         r.add_get("/devices/push/vapid-public-key",
                   self._handle_push_vapid_public_key)
         r.add_post("/devices/push", self._handle_push_register)
@@ -2182,6 +2266,7 @@ class OpenChatSessionAdapter(BasePlatformAdapter):
             "caller": caller,
             "gateway_api_version": GATEWAY_API_VERSION,
             "server_time": _now_ms(),
+            "context_completion": self._context_completion,
         })
 
     async def _handle_sessions_list(self, request) -> web.Response:
@@ -2190,6 +2275,7 @@ class OpenChatSessionAdapter(BasePlatformAdapter):
             request.query.get("include_archived", "").lower()
             in _TRUTHY
         )
+        id_map = await asyncio.to_thread(_ocs_to_sessiondb_map)
         out = []
         for s in self._sessions.list(include_archived=include_archived):
             tip = self._log.tip(s.session_id)
@@ -2198,6 +2284,8 @@ class OpenChatSessionAdapter(BasePlatformAdapter):
                 "tip_seq": tip[0] if tip else 0,
                 "tip_hash": tip[1] if tip else "",
                 "event_count": tip[0] if tip else 0,
+                # Hermes SessionDB id for the same conversation (identity bridge).
+                "sessiondb_id": id_map.get(s.session_id),
             })
         return web.json_response({"sessions": out})
 
@@ -2687,11 +2775,22 @@ class OpenChatSessionAdapter(BasePlatformAdapter):
         await self._authorize(request)
         sid = request.match_info["session_id"]
         self._require_session(sid, include_archived=True)
-        after = request.query.get("after", "")
         try:
             limit = int(request.query.get("limit", "100"))
         except ValueError:
             limit = 100
+        # Backward paging (scroll-up): the page of events before `before`.
+        before = request.query.get("before", "")
+        if before:
+            before_seq = self._log.lookup_hash(sid, before)
+            if not before_seq or before_seq <= 1:
+                return web.json_response({"events": []})
+            events = self._log.range_before(sid, before_seq, limit=limit)
+            resp: dict[str, Any] = {"events": [_wire_event(ev) for ev in events]}
+            if events and events[0]["seq"] > 1:
+                resp["prev_cursor"] = events[0]["hash"]
+            return web.json_response(resp)
+        after = request.query.get("after", "")
         seq = self._log.lookup_hash(sid, after) if after else 0
         if seq is None:
             seq = 0
@@ -2702,6 +2801,26 @@ class OpenChatSessionAdapter(BasePlatformAdapter):
         if events and len(events) == limit:
             resp["next_cursor"] = events[-1]["hash"]
         return web.json_response(resp)
+
+    async def _handle_complete(self, request) -> web.Response:
+        # Authorize before the feature check so a probe can't detect it.
+        await self._authorize(request)
+        sid = request.match_info["session_id"]
+        self._require_session(sid, include_archived=True)
+        if not self._context_completion:
+            raise web.HTTPNotFound(reason="context completion disabled")
+        word = request.query.get("word", "")
+        if not word:
+            return web.json_response({"items": []})
+        # Root: explicit override if set, else let the gateway resolve against
+        # the agent workspace (TERMINAL_CWD) so the picker matches where the
+        # agent actually resolves @file:/@git:.
+        try:
+            items = await asyncio.to_thread(_complete_path_sync, word, self._completion_cwd)
+        except Exception as exc:
+            logger.warning("complete.path failed: %s", exc)
+            items = []
+        return web.json_response({"items": items})
 
 
 # ---------------------------------------------------------------------------

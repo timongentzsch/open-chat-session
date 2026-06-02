@@ -23,7 +23,7 @@ import { HEALTH_POLL_MS } from "@/constants";
 
 export function ChatPage() {
   const client = useGatewayClient();
-  const { sessions, loading, error: sessionsError, refresh, createSession, archiveSession } =
+  const { sessions, loading, error: sessionsError, refresh, createSession, archiveSession, renameSession } =
     useSessions(client);
   const { resume, setResume } = useResumeParam();
 
@@ -167,7 +167,7 @@ export function ChatPage() {
     [archiveSession, selected, setResume],
   );
 
-  const { state, store, runtime, conn, isTyping } = useSessionRuntime(
+  const { state, store, runtime, conn, isTyping, hasOlder, loadingOlder, loadOlder } = useSessionRuntime(
     client,
     selected,
     !!activeSession?.archived,
@@ -278,6 +278,7 @@ export function ChatPage() {
           onSelect={handleSelect}
           onCreate={handleCreate}
           onArchive={handleArchive}
+          onRename={renameSession}
           loading={loading}
           error={sessionsError}
           mobileOpen={sidebarOpen}
@@ -312,6 +313,9 @@ export function ChatPage() {
                 sessionId={selected}
                 attachments={state.attachments}
                 messages={state.messages}
+                hasOlder={hasOlder}
+                loadingOlder={loadingOlder}
+                onLoadOlder={loadOlder}
                 pendingApprovals={pending}
                 onApprovalDecide={handleApproval}
                 pendingClarifies={pendingClarifies}
@@ -325,6 +329,9 @@ export function ChatPage() {
                 }
                 footer={
                   <Composer
+                    client={client}
+                    sessionId={selected}
+                    completionEnabled={health?.context_completion ?? false}
                     replyTarget={replyTarget}
                     onCancelReply={() => setReplyTo(null)}
                     placeholder={

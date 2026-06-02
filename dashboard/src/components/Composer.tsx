@@ -14,6 +14,8 @@ import type { Unstable_TriggerItem } from "@assistant-ui/core";
 import { controlBase, fieldBase, iconButton, smallIconControl } from "@/ui";
 import { SLASH_ITEM_CSS, COMPOSER_CSS, SURFACE_CSS } from "@/chat-styles";
 import type { OurMessage } from "@/runtime/session-store";
+import type { GatewayClient } from "@/gateway-client";
+import { useAtCompletions } from "@/hooks/useAtCompletions";
 import { PaperclipIcon, RemoveIcon, MicIcon, StopRecordIcon, SendIcon } from "@/components/icons";
 import { previewText } from "@/lib/preview";
 
@@ -264,11 +266,7 @@ function SlashCommands() {
         {(items) => (
           <div data-aui-ocs-slash-items className="flex-1">
             {items.map((item, index) => (
-              <SlashCommandItem
-                key={item.id}
-                item={item}
-                index={index}
-              />
+              <PopoverItem key={item.id} item={item} index={index} glyph="/" />
             ))}
           </div>
         )}
@@ -277,7 +275,10 @@ function SlashCommands() {
   );
 }
 
-function SlashCommandItem({ item, index }: { item: Unstable_TriggerItem; index: number }) {
+function PopoverItem(
+  { item, index, glyph, truncateLabel }:
+  { item: Unstable_TriggerItem; index: number; glyph: string; truncateLabel?: boolean },
+) {
   const ref = useRef<HTMLButtonElement | null>(null);
   const { highlightedIndex } = unstable_useTriggerPopoverScopeContext();
   const isHighlighted = highlightedIndex === index;
@@ -297,10 +298,10 @@ function SlashCommandItem({ item, index }: { item: Unstable_TriggerItem; index: 
       className="flex w-full items-start gap-3 px-2.5 py-2 text-left text-sm text-foreground"
     >
       <span className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center border border-midground/25 font-mondwest text-[11px] text-midground">
-        /
+        {glyph}
       </span>
       <span className="min-w-0">
-        <span className="block font-medium">{item.label}</span>
+        <span className={cn("block font-medium", truncateLabel && "truncate")}>{item.label}</span>
         {item.description && (
           <span className="block truncate text-xs text-midground/70">
             {item.description}
@@ -311,16 +312,46 @@ function SlashCommandItem({ item, index }: { item: Unstable_TriggerItem; index: 
   );
 }
 
+function AtCompletions({ client, sessionId }: { client: GatewayClient; sessionId: string }) {
+  const { adapter, formatter } = useAtCompletions(client, sessionId);
+  return (
+    <ComposerPrimitive.Unstable_TriggerPopover
+      char="@"
+      adapter={adapter}
+      className="absolute z-20 flex flex-col overflow-hidden border border-midground/30 bg-background p-1 shadow-xl"
+      data-aui-ocs-slash-popover
+    >
+      <style href="ocs-style-slash-item" precedence="default">{SLASH_ITEM_CSS}</style>
+      <ComposerPrimitive.Unstable_TriggerPopover.Directive formatter={formatter} />
+      <ComposerPrimitive.Unstable_TriggerPopoverItems>
+        {(items) => (
+          <div data-aui-ocs-slash-items className="flex-1">
+            {items.map((item, index) => (
+              <PopoverItem key={item.id} item={item} index={index} glyph="@" truncateLabel />
+            ))}
+          </div>
+        )}
+      </ComposerPrimitive.Unstable_TriggerPopoverItems>
+    </ComposerPrimitive.Unstable_TriggerPopover>
+  );
+}
+
 export interface ComposerProps {
   placeholder?: string;
   replyTarget?: OurMessage;
   onCancelReply?: () => void;
+  client?: GatewayClient;
+  sessionId?: string | null;
+  completionEnabled?: boolean;
 }
 
 export function Composer({
   placeholder,
   replyTarget,
   onCancelReply,
+  client,
+  sessionId,
+  completionEnabled,
 }: ComposerProps) {
   return (
     <ComposerPrimitive.AttachmentDropzone
@@ -383,6 +414,9 @@ export function Composer({
             </ComposerPrimitive.Send>
           </div>
           <SlashCommands />
+          {completionEnabled && client && sessionId && (
+            <AtCompletions client={client} sessionId={sessionId} />
+          )}
         </ComposerPrimitive.Root>
       </ComposerPrimitive.Unstable_TriggerPopoverRoot>
     </ComposerPrimitive.AttachmentDropzone>

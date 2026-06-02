@@ -62,6 +62,9 @@ export interface SessionState {
   errorBanner: string | null;
   lastSeq: number;
   lastHash: string | null;
+  // Lowest loaded event seq/hash — the cursor for backward (scroll-up) paging.
+  firstSeq: number;
+  firstHash: string | null;
   resyncing: boolean;
 }
 
@@ -77,6 +80,8 @@ function initialSessionState(): SessionState {
     errorBanner: null,
     lastSeq: 0,
     lastHash: null,
+    firstSeq: 0,
+    firstHash: null,
     resyncing: false,
   };
 }
@@ -153,14 +158,60 @@ export class SessionStore {
     this.emit();
   }
 
-  loadHistory(events: EventEnvelope[], archived = this.state.archived): void {
-    this.resetState(archived);
-    for (const env of events) this.applyInternal(env);
-    this.emit();
-  }
-
   applyEvent(env: EventEnvelope): void {
     if (this.applyInternal(env)) this.emit();
+  }
+
+  /** Prepend an older page (events with seq < firstSeq, ascending). Folds only
+   *  message/media events into the transcript — past live side-channels
+   *  (typing, approvals, clarifies) are not revived. */
+  prependHistory(events: EventEnvelope[]): void {
+    if (events.length === 0) return;
+    const older: OurMessage[] = [];
+    const byId = new Map<string, number>();
+    const attach: Record<string, AttachmentRef[]> = {};
+    const push = (m: OurMessage) => {
+      const i = byId.get(m.id);
+      if (i === undefined) { byId.set(m.id, older.length); older.push(m); }
+      else { older[i] = { ...older[i], content: m.content }; }
+    };
+    for (const env of events) {
+      const p = (env.payload ?? {}) as Record<string, unknown>;
+      if (env.kind === "gateway.message.in") {
+        const id = (p.message_id as string) ?? `synthetic:${env.hash}`;
+        push({ id, role: "user", content: (p.text as string) ?? "", ts: env.ts, finalized: true, replyTo: p.reply_to as string | undefined });
+        const refs = normalizeAttachmentRefs(p.attachments);
+        if (refs.length) attach[id] = refs;
+      } else if (env.kind === "gateway.message.out" || env.kind === "gateway.message.edit") {
+        const id = p.message_id as string;
+        if (id) push({ id, role: "assistant", content: stripStreamCursor((p.content as string) ?? ""), ts: env.ts, finalized: true });
+      } else if (
+        env.kind === "gateway.image" || env.kind === "gateway.video" ||
+        env.kind === "gateway.animation" || env.kind === "gateway.document" || env.kind === "gateway.voice"
+      ) {
+        const id = (p.message_id as string) ?? `synthetic:${env.hash}`;
+        if (!byId.has(id)) push({ id, role: "assistant", content: (p.caption as string) ?? "", ts: env.ts, finalized: true });
+        const refs = normalizeAttachmentRefs(p.attachments);
+        if (refs.length) attach[id] = [...(attach[id] ?? []), ...refs];
+      }
+    }
+    const existingIds = new Set(this.state.messages.map((m) => m.id));
+    const toPrepend = older.filter((m) => !existingIds.has(m.id));
+    // Merge older attachments even for an already-loaded message id (e.g. a
+    // message whose out/edit straddles a page boundary) rather than dropping them.
+    const attachments = { ...this.state.attachments };
+    for (const [id, refs] of Object.entries(attach)) {
+      const cur = attachments[id] ?? [];
+      const seen = new Set(cur.map((r) => r.attachment_id || r.url));
+      attachments[id] = [...cur, ...refs.filter((r) => !seen.has(r.attachment_id || r.url))];
+    }
+    this.set({
+      messages: [...toPrepend, ...this.state.messages],
+      attachments,
+      firstSeq: events[0].seq,
+      firstHash: events[0].hash,
+    });
+    this.emit();
   }
 
   cancelActive(streamId = ""): void {
@@ -171,6 +222,7 @@ export class SessionStore {
   private applyInternal(env: EventEnvelope): boolean {
     if (env.seq <= this.state.lastSeq && this.state.lastSeq !== 0) return false;
     this.set({ lastSeq: env.seq, lastHash: env.hash });
+    if (this.state.firstSeq === 0) this.set({ firstSeq: env.seq, firstHash: env.hash });
 
     if (
       (!env.payload || typeof env.payload !== "object" || Array.isArray(env.payload)) &&
