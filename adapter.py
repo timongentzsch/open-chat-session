@@ -481,6 +481,20 @@ class HashChainedLog:
                     q.put_nowait(event)
             return event
 
+    def broadcast(self, session_id: str, kind: str, stream_id: str, data: dict) -> None:
+        """Fan out an ephemeral presence event (typing) to live subscribers only.
+        Not persisted and carries no seq/hash — it is never replayed, so presence
+        stays out of the hash chain and out of history."""
+        event = {
+            "seq": 0, "prev_hash": "", "hash": "",
+            "session_id": session_id, "stream_id": stream_id,
+            "kind": kind, "data": data, "ts": _now_ms(),
+            "ephemeral": True,
+        }
+        for q in list(self._subs[session_id]):
+            with contextlib.suppress(asyncio.QueueFull):
+                q.put_nowait(event)
+
     def subscribe(self, session_id: str) -> asyncio.Queue:
         q: asyncio.Queue = asyncio.Queue(maxsize=512)
         q._ocs_overflowed = False
@@ -1524,10 +1538,12 @@ class TailnetEdge:
 # ---------------------------------------------------------------------------
 
 def _sse_event(event_payload: dict) -> bytes:
-    """SSE wire bytes for a logged hash-chain event (includes id: <hash>)."""
+    """SSE wire bytes for an event. Logged events carry id: <hash>; ephemeral
+    presence frames (typing) omit it so they never set the client Last-Event-ID."""
     body = _wire_event(event_payload)
+    head = "" if event_payload.get("ephemeral") else f"id: {event_payload['hash']}\n"
     return (
-        f"id: {event_payload['hash']}\n"
+        f"{head}"
         f"event: {event_payload['kind']}\n"
         f"data: {json.dumps(body)}\n\n"
     ).encode()
@@ -1686,6 +1702,11 @@ class OpenChatSessionAdapter(BasePlatformAdapter):
         self._active_clarify_ids: dict[str, list[str]] = {}
         # (session_id, outbound_message_id) -> inbound stream id
         self._message_streams: dict[tuple[str, str], str] = {}
+        # chats with a live typing indicator — lets stop_typing emit a single
+        # authoritative active:false instead of relying on the client TTL.
+        # Serialized by Hermes's per-chat run dispatch (no concurrent send/stop
+        # for the same chat_id), so no lock is needed.
+        self._typing_on: set[str] = set()
         # (session_id, inbound_stream_id) -> active Hermes dispatch task.
         # This makes /cancel an actual run cancellation path instead of only
         # an audit-log marker.
@@ -1873,11 +1894,23 @@ class OpenChatSessionAdapter(BasePlatformAdapter):
         return SendResult(success=True, message_id=message_id)
 
     async def send_typing(self, chat_id, metadata=None) -> None:
-        # `active: true` matches the documented gateway.typing payload; there is
-        # no active:false event — clients expire typing via a client-side TTL.
-        await self._log.append(
+        # Ephemeral presence — broadcast to live subscribers, never persisted, so
+        # the hash chain isn't bloated by ~2s heartbeats (was 328 rows/session).
+        self._typing_on.add(chat_id)
+        self._log.broadcast(
             chat_id, EventKind.TYPING, _stream_id("typing"),
             {"active": True, "metadata": metadata or {}},
+        )
+
+    async def stop_typing(self, chat_id) -> None:
+        # Authoritative clear at run end/error so clients drop the indicator at
+        # once rather than waiting out the heartbeat TTL. Deduped per chat.
+        if chat_id not in self._typing_on:
+            return
+        self._typing_on.discard(chat_id)
+        self._log.broadcast(
+            chat_id, EventKind.TYPING, _stream_id("typing"),
+            {"active": False, "metadata": {}},
         )
 
     # Media egress — emits `{message_id, attachments: AttachmentRef[],
@@ -2241,7 +2274,9 @@ class OpenChatSessionAdapter(BasePlatformAdapter):
                 continue
             if getattr(q, "_ocs_overflowed", False):
                 return
-            if ev["seq"] <= skip_below_seq:
+            # Ephemeral presence (typing) has no seq and is never part of replay,
+            # so it bypasses the resume-point filter; logged events still gate.
+            if not ev.get("ephemeral") and ev["seq"] <= skip_below_seq:
                 continue
             if accept is not None and not accept(ev):
                 continue

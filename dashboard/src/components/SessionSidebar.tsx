@@ -72,8 +72,6 @@ export function SessionSidebar({
   mobileOpen = false,
   onClose,
 }: SessionSidebarProps) {
-  const [creating, setCreating] = useState(false);
-  const [newName, setNewName] = useState("");
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draftName, setDraftName] = useState("");
 
@@ -96,7 +94,7 @@ export function SessionSidebar({
             data-aui-ocs-control
             type="button"
             className={iconButton}
-            onClick={() => setCreating((v: boolean) => !v)}
+            onClick={() => onCreate()}
             aria-label="New session"
             title="New session"
           >
@@ -117,34 +115,6 @@ export function SessionSidebar({
           )}
         </div>
       </div>
-
-      {creating && (
-        <form
-          className="flex items-center gap-1"
-          onSubmit={(e) => {
-            e.preventDefault();
-            const name = newName.trim();
-            onCreate(name || undefined);
-            setNewName("");
-            setCreating(false);
-          }}
-        >
-          <input
-            autoFocus
-            className={cn(fieldBase, "h-8 flex-1 text-xs")}
-            placeholder="session name (optional)"
-            value={newName}
-            onChange={(e) => setNewName(e.target.value)}
-          />
-          <button
-            data-aui-ocs-control
-            type="submit"
-            className={cn(actionButton, "h-8 border-foreground/40 px-2 text-foreground hover:bg-foreground/20")}
-          >
-            ok
-          </button>
-        </form>
-      )}
 
       {error && (
         <div className="border border-destructive/40 px-2 py-1 text-xs text-destructive">

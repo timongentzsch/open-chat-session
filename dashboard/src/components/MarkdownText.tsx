@@ -43,6 +43,10 @@ const md = {
   cell: "border-b border-midground/20 px-2 py-1 text-left",
 };
 
+// Stable references — passing fresh arrays/objects into Streamdown on every
+// render defeats its memoization and forces markdown/Shiki to re-process (flicker).
+const REMARK_PLUGINS = [remarkHardBreaks];
+
 type HP<T extends keyof React.JSX.IntrinsicElements> = ComponentPropsWithoutRef<T> & ExtraProps;
 
 const components = {
@@ -111,7 +115,7 @@ export const MarkdownText = React.memo(function MarkdownText() {
         className={cn("ocs-markdown min-w-0 break-words text-foreground")}
         components={components}
         controls={false}
-        remarkPlugins={[remarkHardBreaks]}
+        remarkPlugins={REMARK_PLUGINS}
       />
     </>
   );

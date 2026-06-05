@@ -12,13 +12,12 @@ import type {
   GatewayEvent,
   MessageEditPayload,
   MessageCancelPayload,
-  MessageInPayload,
   MessageOutPayload,
-  ResyncPayload,
   StreamId,
   TypingPayload,
   ToolCallId,
 } from "../types";
+import type { CachedHistory, HistorySnapshot } from "../lib/history-cache";
 
 export interface OurMessage {
   id: string;
@@ -57,7 +56,9 @@ export interface SessionState {
   approvals: Record<ToolCallId, ApprovalView>;
   clarifies: Record<ClarifyId, ClarifyView>;
   currentStreamId: StreamId | null;
-  typingTs: number;
+  // Client-clock time of the last live typing/streaming signal; drives the
+  // typing TTL. Not tied to per-message finalize (a finalized message != run end).
+  typingRecvTs: number;
   archived: boolean;
   errorBanner: string | null;
   lastSeq: number;
@@ -75,7 +76,7 @@ function initialSessionState(): SessionState {
     approvals: {},
     clarifies: {},
     currentStreamId: null,
-    typingTs: 0,
+    typingRecvTs: 0,
     archived: false,
     errorBanner: null,
     lastSeq: 0,
@@ -88,6 +89,9 @@ function initialSessionState(): SessionState {
 
 const STREAM_CURSOR_CHAR = "▉";
 const STALE_MS = 30_000;
+// Ignore replayed rows when lighting the indicator; only genuinely recent events
+// mean the agent is working now. Wide enough to absorb clock skew.
+const TYPING_FRESH_MS = 15_000;
 const APPROVAL_DEFAULT_TTL_MS = 5 * 60_000;
 const APPROVAL_DEFAULT_CHOICES: ApprovalDecision[] = ["once", "session", "always", "deny"];
 const OBJECT_PAYLOAD_EVENTS = new Set<string>([
@@ -95,15 +99,24 @@ const OBJECT_PAYLOAD_EVENTS = new Set<string>([
   "gateway.message.out",
   "gateway.message.edit",
   "gateway.message.cancel.requested",
-  "gateway.typing",
   "gateway.image",
   "gateway.video",
   "gateway.animation",
   "gateway.document",
   "gateway.voice",
+  "gateway.approval.request",
+  "gateway.approval.resolved",
   "gateway.clarify.request",
   "gateway.clarify.resolved",
   "gateway.error",
+]);
+
+// Events that contribute to the rendered transcript (everything else — typing,
+// approvals, clarifies, resync, errors — is live-only side-channel state).
+const TRANSCRIPT_KINDS = new Set<string>([
+  "gateway.message.in", "gateway.message.out", "gateway.message.edit",
+  "gateway.image", "gateway.video", "gateway.animation",
+  "gateway.document", "gateway.voice",
 ]);
 
 function isMidStream(content: string | undefined, ts: number): boolean {
@@ -114,10 +127,17 @@ function isMidStream(content: string | undefined, ts: number): boolean {
 export class SessionStore {
   private state: SessionState = initialSessionState();
   private listeners = new Set<() => void>();
+  // Paused for approval/clarify — typing suppressed.
   private blockedStreams = new Set<StreamId>();
-  private closedStreams = new Set<StreamId>();
+  // Run truly ended (cancel/error) — suppress late heartbeats. Per-message
+  // finalize must NOT add here; that was the typing-dropout bug.
+  private endedStreams = new Set<StreamId>();
   private approvalStreams = new Map<ToolCallId, StreamId>();
   private clarifyStreams = new Map<ClarifyId, StreamId>();
+  // Raw transcript events (message/media) keyed by seq. Rendered messages are a
+  // pure fold of these in seq order (foldTranscript), so the live and history
+  // paths agree and a mid-run steer always splits the assistant bubble correctly.
+  private msgEvents = new Map<number, EventEnvelope>();
   getSnapshot = (): SessionState => this.state;
 
   subscribe = (l: () => void): (() => void) => {
@@ -136,7 +156,8 @@ export class SessionStore {
   private resetState(initialArchived = false): void {
     this.state = { ...initialSessionState(), archived: initialArchived };
     this.blockedStreams.clear();
-    this.closedStreams.clear();
+    this.endedStreams.clear();
+    this.msgEvents.clear();
     this.approvalStreams.clear();
     this.clarifyStreams.clear();
   }
@@ -162,55 +183,48 @@ export class SessionStore {
     if (this.applyInternal(env)) this.emit();
   }
 
-  /** Prepend an older page (events with seq < firstSeq, ascending). Folds only
-   *  message/media events into the transcript — past live side-channels
-   *  (typing, approvals, clarifies) are not revived. */
+  /** Merge an older page (events with seq < firstSeq, ascending) into the event
+   *  log and re-fold. firstSeq/firstHash track the oldest raw event (any kind)
+   *  so the next `before=` page continues correctly through typing-only ranges. */
   prependHistory(events: EventEnvelope[]): void {
     if (events.length === 0) return;
-    const older: OurMessage[] = [];
-    const byId = new Map<string, number>();
-    const attach: Record<string, AttachmentRef[]> = {};
-    const push = (m: OurMessage) => {
-      const i = byId.get(m.id);
-      if (i === undefined) { byId.set(m.id, older.length); older.push(m); }
-      else { older[i] = { ...older[i], content: m.content }; }
-    };
     for (const env of events) {
-      const p = (env.payload ?? {}) as Record<string, unknown>;
-      if (env.kind === "gateway.message.in") {
-        const id = (p.message_id as string) ?? `synthetic:${env.hash}`;
-        push({ id, role: "user", content: (p.text as string) ?? "", ts: env.ts, finalized: true, replyTo: p.reply_to as string | undefined });
-        const refs = normalizeAttachmentRefs(p.attachments);
-        if (refs.length) attach[id] = refs;
-      } else if (env.kind === "gateway.message.out" || env.kind === "gateway.message.edit") {
-        const id = p.message_id as string;
-        if (id) push({ id, role: "assistant", content: stripStreamCursor((p.content as string) ?? ""), ts: env.ts, finalized: true });
-      } else if (
-        env.kind === "gateway.image" || env.kind === "gateway.video" ||
-        env.kind === "gateway.animation" || env.kind === "gateway.document" || env.kind === "gateway.voice"
-      ) {
-        const id = (p.message_id as string) ?? `synthetic:${env.hash}`;
-        if (!byId.has(id)) push({ id, role: "assistant", content: (p.caption as string) ?? "", ts: env.ts, finalized: true });
-        const refs = normalizeAttachmentRefs(p.attachments);
-        if (refs.length) attach[id] = [...(attach[id] ?? []), ...refs];
-      }
+      if (TRANSCRIPT_KINDS.has(env.kind)) this.msgEvents.set(env.seq, env);
     }
-    const existingIds = new Set(this.state.messages.map((m) => m.id));
-    const toPrepend = older.filter((m) => !existingIds.has(m.id));
-    // Merge older attachments even for an already-loaded message id (e.g. a
-    // message whose out/edit straddles a page boundary) rather than dropping them.
-    const attachments = { ...this.state.attachments };
-    for (const [id, refs] of Object.entries(attach)) {
-      const cur = attachments[id] ?? [];
-      const seen = new Set(cur.map((r) => r.attachment_id || r.url));
-      attachments[id] = [...cur, ...refs.filter((r) => !seen.has(r.attachment_id || r.url))];
+    this.set({ firstSeq: events[0].seq, firstHash: events[0].hash });
+    this.rebuildTranscript();
+    this.emit();
+  }
+
+  private rebuildTranscript(): void {
+    const { messages, attachments } = foldTranscript([...this.msgEvents.values()]);
+    // Reuse the previous object for unchanged messages so assistant-ui/streamdown
+    // only re-render (and re-highlight) the bubble that actually changed — folding
+    // from scratch each edit would otherwise reflow the whole transcript (scroll
+    // jitter) on every streamed token.
+    this.set({ messages: reuseUnchanged(this.state.messages, messages), attachments });
+  }
+
+  /** Snapshot the transcript events + tip for the localStorage cache; the cache
+   *  derives the first-cursors from the retained events. */
+  exportRaw(): HistorySnapshot {
+    return {
+      lastSeq: this.state.lastSeq,
+      lastHash: this.state.lastHash,
+      events: [...this.msgEvents.values()],
+    };
+  }
+
+  /** Seed from a cached snapshot so a reopened session renders instantly; the
+   *  connect then resumes from `lastHash` and the server replays only the delta
+   *  (or sends gateway.resync if the cached tip is unknown). */
+  importHistory(c: CachedHistory): void {
+    this.msgEvents.clear();
+    for (const env of c.events) {
+      if (TRANSCRIPT_KINDS.has(env.kind)) this.msgEvents.set(env.seq, env);
     }
-    this.set({
-      messages: [...toPrepend, ...this.state.messages],
-      attachments,
-      firstSeq: events[0].seq,
-      firstHash: events[0].hash,
-    });
+    this.set({ lastSeq: c.lastSeq, lastHash: c.lastHash, firstSeq: c.firstSeq, firstHash: c.firstHash });
+    this.rebuildTranscript();
     this.emit();
   }
 
@@ -220,6 +234,20 @@ export class SessionStore {
   }
 
   private applyInternal(env: EventEnvelope): boolean {
+    // Ephemeral presence (typing) carries no seq/hash and is never part of the
+    // log/replay — handle it without touching the resume cursor or seq-dedupe.
+    // (Legacy persisted typing rows from older sessions land here too and are
+    // correctly ignored by the freshness gate.)
+    if (env.kind === "gateway.typing") {
+      const p = env.payload as TypingPayload;
+      if (p?.active === false) { this.set({ typingRecvTs: 0 }); return true; }
+      const streamId = env.stream_id ?? this.state.currentStreamId;
+      if (streamId && !this.state.currentStreamId && !this.endedStreams.has(streamId)) {
+        this.set({ currentStreamId: streamId });
+      }
+      this.markTyping(env);
+      return true;
+    }
     if (env.seq <= this.state.lastSeq && this.state.lastSeq !== 0) return false;
     this.set({ lastSeq: env.seq, lastHash: env.hash });
     if (this.state.firstSeq === 0) this.set({ firstSeq: env.seq, firstHash: env.hash });
@@ -235,82 +263,38 @@ export class SessionStore {
     // payload type through the switch without explicit casts.
     switch (env.kind) {
       case "gateway.message.in": {
-        const ge = env as EventEnvelope & GatewayEvent & { kind: "gateway.message.in" };
-        const p: MessageInPayload = ge.payload;
-        const id = p.message_id ?? `synthetic:${env.hash}`;
-        this.upsertMessage({
-          id, role: "user", content: p.text ?? "", ts: env.ts, finalized: true,
-          replyTo: p.reply_to,
-        });
-        this.mergeAttachments(id, normalizeAttachmentRefs(p.attachments));
+        this.msgEvents.set(env.seq, env);
         this.set({ currentStreamId: env.stream_id ?? this.state.currentStreamId });
+        this.rebuildTranscript();
         return true;
       }
       case "gateway.message.out": {
-        const ge = env as EventEnvelope & GatewayEvent & { kind: "gateway.message.out" };
-        const p: MessageOutPayload = ge.payload;
-        const id = p.message_id;
-        const content = p.content ?? "";
-        const finalized = !isMidStream(content, env.ts);
-        if (env.stream_id) this.closedStreams.delete(env.stream_id);
-        this.upsertMessage({
-          id, role: "assistant", content,
-          ts: env.ts, finalized,
-          replyTo: p.reply_to,
-        });
+        const p = env.payload as MessageOutPayload;
+        const finalized = !isMidStream(p.content ?? "", env.ts);
+        this.msgEvents.set(env.seq, env);
         this.set({
           currentStreamId: finalized ? null : (env.stream_id ?? this.state.currentStreamId),
-          typingTs: finalized ? 0 : env.ts,
         });
+        if (!finalized) this.markTyping(env);
+        this.rebuildTranscript();
         return true;
       }
       case "gateway.message.edit": {
-        const ge = env as EventEnvelope & GatewayEvent & { kind: "gateway.message.edit" };
-        const p: MessageEditPayload = ge.payload;
-        const id = p.message_id;
-        const content = p.content ?? "";
+        const p = env.payload as MessageEditPayload;
         const finalized = p.finalize === true
-          || (p.finalize !== false && !isMidStream(content, env.ts));
-        if (env.stream_id) this.closedStreams.delete(env.stream_id);
-        const existing = this.findMessage(id);
-        this.upsertMessage(existing
-          ? { ...existing, content, finalized }
-          : {
-              id, role: "assistant", content,
-              ts: env.ts, finalized,
-            },
-        );
+          || (p.finalize !== false && !isMidStream(p.content ?? "", env.ts));
+        this.msgEvents.set(env.seq, env);
         this.set({
-          typingTs: finalized ? 0 : env.ts,
           currentStreamId: finalized ? null : (env.stream_id ?? this.state.currentStreamId),
         });
-        if (finalized && env.stream_id) this.closedStreams.add(env.stream_id);
+        // finalize ends this message, not the run — never clear typing here.
+        if (!finalized) this.markTyping(env);
+        this.rebuildTranscript();
         return true;
       }
       case "gateway.message.cancel.requested": {
-        const ge = env as EventEnvelope & GatewayEvent & {
-          kind: "gateway.message.cancel.requested";
-          payload: MessageCancelPayload;
-        };
-        this.applyCancel(ge.payload.stream_id || env.stream_id || "");
-        return true;
-      }
-      case "gateway.typing": {
-        const ge = env as EventEnvelope & GatewayEvent & { kind: "gateway.typing" };
-        const p: TypingPayload = ge.payload;
-        const streamId = env.stream_id ?? this.state.currentStreamId;
-        if (streamId && (this.blockedStreams.has(streamId) || this.closedStreams.has(streamId))) {
-          if (p.active === false && this.state.currentStreamId === streamId) {
-            this.set({ currentStreamId: null, typingTs: 0 });
-          }
-          return true;
-        }
-        // Capture stream_id during "typing..." before the first message chunk
-        // arrives so assistant-ui's cancel hook can interrupt the active run.
-        this.set({
-          typingTs: p.active === false ? 0 : env.ts,
-          currentStreamId: streamId,
-        });
+        const p = env.payload as MessageCancelPayload;
+        this.applyCancel(p.stream_id || env.stream_id || "");
         return true;
       }
       case "gateway.image":
@@ -318,23 +302,8 @@ export class SessionStore {
       case "gateway.animation":
       case "gateway.document":
       case "gateway.voice": {
-        const p = env.payload as {
-          message_id?: string;
-          attachments?: unknown;
-          caption?: string;
-        };
-        const refs = normalizeAttachmentRefs(p.attachments);
-        const id = p.message_id ?? `synthetic:${env.hash}`;
-        const existing = this.findMessage(id);
-        if (!existing) {
-          this.upsertMessage({
-            id, role: "assistant", content: p.caption ?? "",
-            ts: env.ts, finalized: true,
-          });
-        } else if (p.caption && !existing.content) {
-          this.upsertMessage({ ...existing, content: p.caption });
-        }
-        this.mergeAttachments(id, refs);
+        this.msgEvents.set(env.seq, env);
+        this.rebuildTranscript();
         return true;
       }
       case "gateway.approval.request":
@@ -350,18 +319,20 @@ export class SessionStore {
         this.applyClarifyResolved(env);
         return true;
       case "gateway.resync": {
-        const p = env.payload as ResyncPayload;
         const archived = this.state.archived;
         this.resetState(archived);
-        this.set({ resyncing: true, lastSeq: p.tip_seq ?? 0, lastHash: p.tip_hash ?? null });
+        // lastSeq stays 0: the reconnect replays from the start, and the seq-dedupe
+        // would otherwise drop that replay. tip_seq/tip_hash are not resume cursors.
+        this.set({ resyncing: true });
         return true;
       }
       case "gateway.error": {
         const p = env.payload as { message?: string; code?: string };
+        if (env.stream_id) this.endedStreams.add(env.stream_id);
         this.set({
           errorBanner: p.message || p.code || "stream error",
           currentStreamId: null,
-          typingTs: 0,
+          typingRecvTs: 0,
         });
         return true;
       }
@@ -369,44 +340,29 @@ export class SessionStore {
     return false;
   }
 
-  private upsertMessage(m: OurMessage): void {
-    const exists = this.state.messages.some((x) => x.id === m.id);
-    this.set({
-      messages: exists
-        ? this.state.messages.map((x) => (x.id === m.id ? m : x))
-        : [...this.state.messages, m],
-    });
+  // Light the typing indicator from a live working signal (heartbeat / streaming
+  // edit). Skips blocked/ended streams and stale replayed rows.
+  private markTyping(env: EventEnvelope): void {
+    const streamId = env.stream_id ?? this.state.currentStreamId;
+    if (streamId && (this.blockedStreams.has(streamId) || this.endedStreams.has(streamId))) return;
+    if (Date.now() - env.ts >= TYPING_FRESH_MS) return;
+    this.set({ typingRecvTs: Date.now() });
   }
 
-  private findMessage(id: string): OurMessage | undefined {
-    return this.state.messages.find((m) => m.id === id);
-  }
-
-  private mergeAttachments(messageId: string, refs: AttachmentRef[]): void {
-    if (refs.length === 0) return;
-    const cur = this.state.attachments[messageId] ?? [];
-    const seen = new Set(cur.map((r) => r.attachment_id || r.url));
-    const merged = [...cur];
-    for (const r of refs) {
-      const key = r.attachment_id || r.url;
-      if (!seen.has(key)) {
-        merged.push(r);
-        seen.add(key);
-      }
-    }
-    this.set({ attachments: { ...this.state.attachments, [messageId]: merged } });
-  }
-
+  // Optimistic finalize of in-flight assistant messages on cancel. This mutates
+  // the rendered messages directly (outside the fold) for instant feedback; a
+  // subsequent authoritative edit re-folds from msgEvents, and the run is over so
+  // no further non-final edits arrive to revert it.
   private applyCancel(streamId: string): void {
     if (streamId) {
       this.blockedStreams.delete(streamId);
-      this.closedStreams.add(streamId);
+      this.endedStreams.add(streamId);
     }
     this.set({
       currentStreamId: streamId && this.state.currentStreamId !== streamId
         ? this.state.currentStreamId
         : null,
-      typingTs: 0,
+      typingRecvTs: 0,
       messages: this.state.messages.map(finishAssistantMessage),
       approvals: Object.fromEntries(
         Object.entries(this.state.approvals).map(([id, approval]) => [
@@ -452,7 +408,7 @@ export class SessionStore {
     this.set({
       approvals: { ...this.state.approvals, [p.tool_call_id]: view },
       currentStreamId: env.stream_id ?? this.state.currentStreamId,
-      typingTs: 0,
+      typingRecvTs: 0,
     });
   }
 
@@ -498,7 +454,7 @@ export class SessionStore {
     this.set({
       clarifies: { ...this.state.clarifies, [p.clarify_id]: view },
       currentStreamId: env.stream_id ?? this.state.currentStreamId,
-      typingTs: 0,
+      typingRecvTs: 0,
     });
   }
 
@@ -515,6 +471,26 @@ export class SessionStore {
   }
 }
 
+// Return `next` with each unchanged message replaced by its previous object so
+// references stay stable across rebuilds (keeps React/streamdown from re-rendering
+// untouched bubbles). Returns the previous array unchanged if nothing differs.
+function reuseUnchanged(prev: OurMessage[], next: OurMessage[]): OurMessage[] {
+  if (prev.length === 0) return next;
+  const byId = new Map(prev.map((m) => [m.id, m]));
+  let changed = next.length !== prev.length;
+  const out = next.map((m, i) => {
+    const old = byId.get(m.id);
+    if (old && old.content === m.content && old.finalized === m.finalized
+      && old.role === m.role && old.ts === m.ts && old.replyTo === m.replyTo) {
+      if (prev[i] !== old) changed = true;
+      return old;
+    }
+    changed = true;
+    return m;
+  });
+  return changed ? out : prev;
+}
+
 function finishAssistantMessage(m: OurMessage): OurMessage {
   if (m.role !== "assistant" || m.finalized) return m;
   return { ...m, content: stripStreamCursor(m.content), finalized: true };
@@ -522,6 +498,109 @@ function finishAssistantMessage(m: OurMessage): OurMessage {
 
 function stripStreamCursor(content: string): string {
   return content.endsWith(STREAM_CURSOR_CHAR) ? content.slice(0, -1) : content;
+}
+
+// Slice cumulative content to a split segment, keeping the streaming cursor on the tail.
+function segmentContent(rawFull: string, base: number): string {
+  if (base <= 0) return rawFull;
+  const body = stripStreamCursor(rawFull).slice(base);
+  return rawFull.endsWith(STREAM_CURSOR_CHAR) ? body + STREAM_CURSOR_CHAR : body;
+}
+
+/** Fold the seq-ordered transcript events into rendered messages + attachments.
+ *  Pure, so the live stream and history paging produce identical output. An
+ *  assistant message reused across a user steer is split into ordered segments. */
+function foldTranscript(events: EventEnvelope[]): {
+  messages: OurMessage[];
+  attachments: Record<string, AttachmentRef[]>;
+} {
+  const messages: OurMessage[] = [];
+  const idx = new Map<string, number>();        // ourId -> messages index
+  const segOf = new Map<string, string>();      // realId -> current segment id
+  const segBase = new Map<string, number>();    // segment id -> stripped chars before it
+  const lastEdit = new Map<string, number>();   // realId -> seq of its last content change
+  const lastFull = new Map<string, string>();   // realId -> last cumulative content
+  const attachments: Record<string, AttachmentRef[]> = {};
+  let lastInbound = 0;
+
+  const put = (m: OurMessage) => {
+    const i = idx.get(m.id);
+    if (i === undefined) { idx.set(m.id, messages.length); messages.push(m); }
+    else messages[i] = m;
+  };
+  const get = (id: string): OurMessage | undefined => {
+    const i = idx.get(id);
+    return i === undefined ? undefined : messages[i];
+  };
+  const addAttach = (id: string, refs: AttachmentRef[]) => {
+    if (!refs.length) return;
+    const cur = attachments[id] ?? [];
+    const seen = new Set(cur.map((r) => r.attachment_id || r.url));
+    attachments[id] = [...cur, ...refs.filter((r) => !seen.has(r.attachment_id || r.url))];
+  };
+
+  for (const env of [...events].sort((a, b) => a.seq - b.seq)) {
+    const p = (env.payload ?? {}) as Record<string, unknown>;
+    switch (env.kind) {
+      case "gateway.message.in": {
+        const id = (p.message_id as string) ?? `synthetic:${env.hash}`;
+        put({ id, role: "user", content: (p.text as string) ?? "", ts: env.ts, finalized: true, replyTo: p.reply_to as string | undefined });
+        addAttach(id, normalizeAttachmentRefs(p.attachments));
+        lastInbound = env.seq;
+        break;
+      }
+      case "gateway.message.out": {
+        const id = p.message_id as string;
+        const content = (p.content as string) ?? "";
+        const finalized = !isMidStream(content, env.ts);
+        if (!segOf.has(id)) { segOf.set(id, id); segBase.set(id, 0); }
+        lastEdit.set(id, env.seq);
+        lastFull.set(id, content);
+        put({ id, role: "assistant", content: finalized ? stripStreamCursor(content) : content, ts: env.ts, finalized, replyTo: p.reply_to as string | undefined });
+        break;
+      }
+      case "gateway.message.edit": {
+        const id = p.message_id as string;
+        const content = (p.content as string) ?? "";
+        const finalized = p.finalize === true || (p.finalize !== false && !isMidStream(content, env.ts));
+        const known = segOf.has(id);
+        const changed = content !== lastFull.get(id);
+        if (!known) { segOf.set(id, id); segBase.set(id, 0); }
+        // A steer landed since this message's last content change → split here so
+        // the steer renders between the before/after content (strict seq order).
+        else if (changed && lastInbound > (lastEdit.get(id) ?? 0)) {
+          const oldId = segOf.get(id) ?? id;
+          const oldMsg = get(oldId);
+          const frozen = oldMsg ? stripStreamCursor(oldMsg.content) : "";
+          if (oldMsg) put({ ...oldMsg, content: frozen, finalized: true });
+          const newId = `${id}#${env.seq}`;
+          segBase.set(newId, (segBase.get(oldId) ?? 0) + frozen.length);
+          segOf.set(id, newId);
+        }
+        if (changed) lastEdit.set(id, env.seq);
+        lastFull.set(id, content);
+        const segId = segOf.get(id) ?? id;
+        const disp0 = segmentContent(content, segBase.get(segId) ?? 0);
+        const disp = finalized ? stripStreamCursor(disp0) : disp0;
+        const existing = get(segId);
+        put(existing ? { ...existing, content: disp, finalized } : { id: segId, role: "assistant", content: disp, ts: env.ts, finalized });
+        break;
+      }
+      case "gateway.image":
+      case "gateway.video":
+      case "gateway.animation":
+      case "gateway.document":
+      case "gateway.voice": {
+        const id = (p.message_id as string) ?? `synthetic:${env.hash}`;
+        const existing = get(id);
+        if (!existing) put({ id, role: "assistant", content: (p.caption as string) ?? "", ts: env.ts, finalized: true });
+        else if (p.caption && !existing.content) put({ ...existing, content: p.caption as string });
+        addAttach(id, normalizeAttachmentRefs(p.attachments));
+        break;
+      }
+    }
+  }
+  return { messages, attachments };
 }
 
 function normalizeAttachmentRefs(refs: unknown): AttachmentRef[] {

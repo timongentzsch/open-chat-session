@@ -153,76 +153,90 @@ export function ChatThread({
     };
   }, []);
 
-  // Scroll-up paging. Right before the prepend we snapshot distance-from-bottom,
-  // then hold the viewport pinned to it while the prepended page settles its
-  // (async markdown) height above, so the user stays on the same message.
-  // Driven by a MutationObserver plus timed re-applies; released on user scroll
-  // or after the cap. `pinning` suppresses the load-trigger during that window
-  // (programmatic scrollTop writes would otherwise re-fire it).
-  const pinningRef = useRef(false);
+  // Scroll anchoring for "load more": pin the first visible message to its screen
+  // position across the prepend. We capture that message + its top before the
+  // fetch, then correct scrollTop by the top delta in a layout effect (pre-paint,
+  // so there's no visible jump) and again as async markdown/Shiki settle the
+  // newly-prepended heights above. Correcting by element delta (not by
+  // distance-from-bottom in a post-paint MutationObserver) removes the jitter.
+  const pendingAnchorRef = useRef<{ id: string; top: number } | null>(null);
   const beforePrepend = useCallback(() => {
     const vp = viewportRef.current;
     if (!vp) return;
-    const pinDist = vp.scrollHeight - vp.scrollTop;
-    pinningRef.current = true;
-    let cancelled = false;
-    let quietTimer = 0;
-    let capTimer = 0;
-    const stop = () => {
-      cancelled = true;
-      pinningRef.current = false;
-      mo.disconnect();
-      clearTimeout(quietTimer);
-      clearTimeout(capTimer);
-      vp.removeEventListener("wheel", stop);
-      vp.removeEventListener("touchstart", stop);
-    };
-    const apply = () => {
-      const v = viewportRef.current;
-      if (cancelled || !v) return;
-      v.scrollTop = v.scrollHeight - pinDist;
-      // Release once the content has been quiet (settled) for a beat.
-      clearTimeout(quietTimer);
-      quietTimer = window.setTimeout(stop, 300);
-    };
-    const mo = new MutationObserver(apply);
-    mo.observe(vp, { childList: true, subtree: true, characterData: true });
-    vp.addEventListener("wheel", stop, { passive: true });
-    vp.addEventListener("touchstart", stop, { passive: true });
-    apply();
-    capTimer = window.setTimeout(stop, 5000);
+    const vpTop = vp.getBoundingClientRect().top;
+    pendingAnchorRef.current = null;
+    for (const el of vp.querySelectorAll<HTMLElement>("[data-aui-ocs-message-id]")) {
+      const r = el.getBoundingClientRect();
+      if (r.bottom > vpTop + 1) {
+        const id = el.getAttribute("data-aui-ocs-message-id");
+        if (id) pendingAnchorRef.current = { id, top: r.top };
+        break;
+      }
+    }
   }, []);
 
-  useEffect(() => {
+  React.useLayoutEffect(() => {
+    const anchor = pendingAnchorRef.current;
     const vp = viewportRef.current;
-    if (!vp || !onLoadOlder) return;
-    const TRIGGER_PX = 200;
-    const onScroll = () => {
-      if (!pinningRef.current && hasOlder && !loadingOlder && vp.scrollTop < TRIGGER_PX) {
-        onLoadOlder(beforePrepend);
-      }
+    if (!anchor || !vp) return;
+    const correct = () => {
+      const el = vp.querySelector<HTMLElement>(`[data-aui-ocs-message-id="${CSS.escape(anchor.id)}"]`);
+      if (!el) return;
+      const delta = el.getBoundingClientRect().top - anchor.top;
+      if (delta) vp.scrollTop += delta;
     };
-    vp.addEventListener("scroll", onScroll, { passive: true });
-    return () => vp.removeEventListener("scroll", onScroll);
-  }, [hasOlder, loadingOlder, onLoadOlder, beforePrepend]);
+    correct(); // synchronous, before paint
+    if (loadingOlder) return; // more pages still coming — keep the anchor
+    // Loading finished: re-pin as async markdown/media settle, then release.
+    const ro = new ResizeObserver(correct);
+    vp.querySelectorAll<HTMLElement>("[data-aui-ocs-message-id]").forEach((el) => ro.observe(el));
+    const release = () => {
+      ro.disconnect();
+      clearTimeout(cap);
+      vp.removeEventListener("wheel", release);
+      vp.removeEventListener("touchstart", release);
+      pendingAnchorRef.current = null;
+    };
+    const cap = window.setTimeout(release, 1000);
+    vp.addEventListener("wheel", release, { passive: true });
+    vp.addEventListener("touchstart", release, { passive: true });
+    return () => { ro.disconnect(); clearTimeout(cap); };
+  }, [messages.length, loadingOlder]);
+
+  // Explicit paging: a "load older" button is more predictable than a
+  // scroll-position trigger (which was unreliable right after a reload), and
+  // keeps the viewport anchored via beforePrepend.
+  const handleLoadOlder = useCallback(() => {
+    if (!onLoadOlder || loadingOlder) return;
+    onLoadOlder(beforePrepend);
+  }, [onLoadOlder, loadingOlder, beforePrepend]);
 
   return (
     <ThreadPrimitive.Root className="relative flex min-h-0 flex-1 flex-col">
       <style href="ocs-style-bubble-spacing" precedence="default">{BUBBLE_AND_SPACING_CSS}</style>
-      {loadingOlder && (
-        <div className="pointer-events-none absolute inset-x-0 top-0 z-20 flex justify-center py-1.5">
-          <span className="border border-midground/30 bg-background px-2 py-0.5 font-mondwest text-[10px] uppercase tracking-[0.12em] text-midground/60">
-            loading older…
-          </span>
-        </div>
-      )}
       <ThreadPrimitive.Viewport
         ref={viewportRef}
         autoScroll
         scrollToBottomOnRunStart={false}
         data-aui-ocs-thread-viewport
+        // overflowAnchor:none so the browser doesn't fight beforePrepend's manual
+        // scroll anchoring during a prepend (no Tailwind utility for this).
+        style={{ overflowAnchor: "none" }}
         className="flex min-h-0 flex-1 flex-col overflow-y-auto px-4 py-4"
       >
+        {hasOlder && (
+          <div className="flex shrink-0 justify-center pb-3">
+            <button
+              data-aui-ocs-control
+              type="button"
+              onClick={handleLoadOlder}
+              disabled={loadingOlder}
+              className="border border-midground/30 bg-background px-3 py-1 font-mondwest text-[10px] uppercase tracking-[0.12em] text-midground/70 hover:text-foreground disabled:opacity-50"
+            >
+              {loadingOlder ? "loading…" : "load older messages"}
+            </button>
+          </div>
+        )}
         <AuiIf condition={(s: AssistantState) => s.thread.isEmpty}>
           <div className="flex flex-1 items-center justify-center px-6 text-sm text-midground/60">
             {emptyHint ?? DEFAULT_EMPTY_HINT}
@@ -433,6 +447,7 @@ function Bubble({ sessionId, attachments, role, onReply, showTime = true }: Bubb
   return (
     <MessagePrimitive.Root
       data-aui-role={role}
+      data-aui-ocs-message-id={id}
       className={cn("flex flex-col first:mt-0", isUser ? "items-end" : "items-start")}
     >
       <div className={cn("relative flex max-w-[80%] flex-col", isUser ? "items-end" : "items-start")}>

@@ -17,6 +17,7 @@ import {
 import { createAttachmentAdapter } from "@/runtime/attachment-adapter";
 import { ERR_ID_PREFIX } from "@/constants";
 import { previewText } from "@/lib/preview";
+import { loadHistory, saveHistory, clearHistory } from "@/lib/history-cache";
 
 export type ConnState =
   | { kind: "idle" }
@@ -41,19 +42,24 @@ export interface UseSessionRuntimeResult {
 
 const TYPING_MS = 5000;
 
+// Cache the converted message by source identity. The store reuses OurMessage
+// objects for unchanged bubbles, so cache hits keep the same ThreadMessageLike
+// reference and assistant-ui/streamdown skip re-rendering untouched bubbles.
+const convertCache = new WeakMap<OurMessage, ThreadMessageLike>();
 function convertMessage(m: OurMessage): ThreadMessageLike {
+  const hit = convertCache.get(m);
+  if (hit) return hit;
   const base: ThreadMessageLike = {
     id: m.id,
     role: m.role,
     content: [{ type: "text", text: m.content }],
     createdAt: new Date(m.ts),
   };
-  return m.role === "assistant"
-    ? {
-        ...base,
-        status: m.finalized ? { type: "complete", reason: "stop" } : { type: "running" },
-      }
+  const out = m.role === "assistant"
+    ? { ...base, status: (m.finalized ? { type: "complete", reason: "stop" } : { type: "running" }) as ThreadMessageLike["status"] }
     : base;
+  convertCache.set(m, out);
+  return out;
 }
 
 export function useSessionRuntime(
@@ -75,8 +81,11 @@ export function useSessionRuntime(
   // per resync — the connect effect's store.reset clears resyncing.
   const [resyncEpoch, setResyncEpoch] = useState(0);
   useEffect(() => {
-    if (state.resyncing) setResyncEpoch((n) => n + 1);
-  }, [state.resyncing]);
+    if (!state.resyncing) return;
+    // The cached chain is now invalid — drop it so the reconnect fetches fresh.
+    if (sessionId) clearHistory(sessionId);
+    setResyncEpoch((n) => n + 1);
+  }, [state.resyncing, sessionId]);
 
   useEffect(() => {
     store.setArchived(archived);
@@ -92,6 +101,11 @@ export function useSessionRuntime(
     const ac = new AbortController();
     let attempt = 0;
     store.reset(archived);
+    // Hydrate from the local cache for an instant render; the connect below then
+    // resumes from the cached tip hash (server replays only the delta, or sends
+    // gateway.resync if the tip is unknown — which clears the cache and refetches).
+    const cached = loadHistory(sessionId);
+    if (cached) store.importHistory(cached);
 
     async function run() {
       while (!cancelled) {
@@ -145,13 +159,36 @@ export function useSessionRuntime(
     };
   }, [client, sessionId, archived, store, resyncEpoch]);
 
-  const [now, setNow] = useState(() => Date.now());
+  // Cache the transcript when the tip advances (debounced to batch streaming),
+  // so reopening renders instantly and only the delta is fetched.
   useEffect(() => {
-    if (!state.typingTs) return;
-    const id = window.setInterval(() => setNow(Date.now()), 500);
-    return () => window.clearInterval(id);
-  }, [state.typingTs]);
-  const isTyping = state.typingTs > 0 && now - state.typingTs < TYPING_MS;
+    if (!sessionId || state.resyncing || !state.lastHash) return;
+    const sid = sessionId;
+    const tip = state.lastHash;
+    const id = window.setTimeout(() => {
+      // Re-check at flush: a resync may have landed (which would have changed the
+      // tip / cleared the cache), and the effect cleanup cancels on session switch
+      // — so only persist if we're still on the same session at the same tip.
+      const snap = store.getSnapshot();
+      if (snap.resyncing || snap.lastHash !== tip) return;
+      saveHistory(sid, store.exportRaw());
+    }, 800);
+    return () => window.clearTimeout(id);
+  }, [sessionId, state.lastHash, state.resyncing, store]);
+
+  // One expiry timeout per heartbeat (rescheduled on each), instead of a polling
+  // interval — no idle re-renders, and the deadline is absolute so it can't go
+  // stale. typingRecvTs is client-clock, so the TTL is immune to server skew.
+  const [typingExpired, setTypingExpired] = useState(true);
+  useEffect(() => {
+    if (!state.typingRecvTs) { setTypingExpired(true); return; }
+    setTypingExpired(false);
+    const remaining = state.typingRecvTs + TYPING_MS - Date.now();
+    if (remaining <= 0) { setTypingExpired(true); return; }
+    const id = window.setTimeout(() => setTypingExpired(true), remaining);
+    return () => window.clearTimeout(id);
+  }, [state.typingRecvTs]);
+  const isTyping = state.typingRecvTs > 0 && !typingExpired;
 
   const cancelRun = async () => {
     if (!sessionId) return;
@@ -164,17 +201,28 @@ export function useSessionRuntime(
   const [loadingOlder, setLoadingOlder] = useState(false);
   const loadingOlderRef = useRef(false);
   const loadOlder = useCallback(async (beforePrepend?: () => void) => {
-    const snap = store.getSnapshot();
-    if (loadingOlderRef.current || !sessionId || !snap.firstHash || snap.firstSeq <= 1) return;
+    if (loadingOlderRef.current || !sessionId) return;
+    const start = store.getSnapshot();
+    if (!start.firstHash || start.firstSeq <= 1) return;
     loadingOlderRef.current = true;
     setLoadingOlder(true);
+    beforePrepend?.();
+    // Persisted typing heartbeats bloat the log, so one raw page can be almost
+    // all typing. Keep paging until we reveal enough real messages (or hit
+    // genesis), so a click never appears to "do nothing".
+    const TARGET_NEW = 12;
+    const MAX_PAGES = 8;
+    const baseCount = start.messages.length;
     try {
-      const h = await client.history(sessionId, { before: snap.firstHash, limit: 200 });
-      if (h.events.length > 0) {
-        beforePrepend?.();
+      for (let i = 0; i < MAX_PAGES; i++) {
+        const snap = store.getSnapshot();
+        if (!snap.firstHash || snap.firstSeq <= 1) break;
+        const h = await client.history(sessionId, { before: snap.firstHash, limit: 200 });
+        if (h.events.length === 0) break;
         store.prependHistory([...h.events].sort((a, b) => a.seq - b.seq));
+        if (store.getSnapshot().messages.length - baseCount >= TARGET_NEW) break;
       }
-    } catch { /* tolerated — user can retry by scrolling */ }
+    } catch { /* tolerated — user can retry */ }
     finally {
       loadingOlderRef.current = false;
       setLoadingOlder(false);

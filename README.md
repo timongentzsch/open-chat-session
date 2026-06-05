@@ -19,9 +19,11 @@ not replace the stock `/chat` page.
 - Plugin-owned HTTPS-friendly edge on `127.0.0.1:9120` for Tailscale Serve.
 - Reference dashboard UI built from `@assistant-ui/react` headless primitives.
 - Multi-session chat with rename, history replay (forward + backward paging),
-  live streaming, replies, attachments, typing, slash commands, opt-in
+  live streaming, replies, attachments, ephemeral typing, slash commands, opt-in
   `@`-context completion, clarify prompts, exec approvals, cancellation, and
   background Web Push.
+- Dashboard caches each session's transcript in `localStorage` for an instant
+  reopen, then resumes from the cached tip hash to fetch only new events.
 - Sessions report their Hermes `SessionDB` id (`sessiondb_id`), so the same
   conversation is addressable across the dashboard, desktop app, and TUI.
 - Hash-chained per-session `log.db`; blobs stored content-addressed in
@@ -110,7 +112,9 @@ Direct clients must send auth and `X-Device-Id` themselves.
 | `POST` / `DELETE` | `/devices/push[/{device_id}]` | manage push device |
 
 SSE events use the event hash as `id`; clients should dedupe by `hash` and
-ignore unknown `kind` values.
+ignore unknown `kind` values. Ephemeral presence (`gateway.typing`) is the
+exception: it is broadcast live only — no `id`, no `seq`, never replayed — so
+clients drive the indicator off a short receipt-time TTL.
 
 ## Context Completion
 
