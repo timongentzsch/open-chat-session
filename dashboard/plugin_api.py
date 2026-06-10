@@ -142,7 +142,7 @@ def _passthrough_response_headers(upstream_headers: httpx.Headers) -> dict[str, 
 
 
 # PWA assets (sw.js, manifest.json, icons) are served by the plugin's own
-# TailnetEdge (adapter.py), not this proxy — it serves dashboard/public/* and
+# TailnetEdge (edge.py), not this proxy — it serves dashboard/public/* and
 # bypasses the session-token middleware the browser can't send for SW/manifest.
 
 @router.api_route(

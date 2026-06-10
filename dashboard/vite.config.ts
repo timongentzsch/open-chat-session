@@ -18,7 +18,7 @@ function bumpManifestVersion() {
         .slice(0, 10)
         .replaceAll("-", "")}${Date.now().toString(36).slice(-4)}`;
       const text = readFileSync(manifestPath, "utf8");
-      const next = text.replace(/(\.js)\?v=[^"]+/g, `$1?v=${stamp}`);
+      const next = text.replace(/(\.(?:js|css))\?v=[^"]+/g, `$1?v=${stamp}`);
       if (next !== text) writeFileSync(manifestPath, next);
     },
   };
@@ -60,6 +60,7 @@ export default defineConfig({
       name: "OpenChatSessionPlugin",
       formats: ["iife"],
       fileName: () => "index.js",
+      cssFileName: "style",
     },
     rollupOptions: {
       // Radix/assistant-ui ship "use client" directives that rollup IIFE

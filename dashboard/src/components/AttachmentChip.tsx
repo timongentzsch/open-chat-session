@@ -1,7 +1,6 @@
 import { React, cn, useEffect, useState } from "@/sdk";
 import type { AttachmentRef } from "@/types";
 import { PROXY_BASE, authHeaders, humanSize, BLOB_URL_CLEANUP_MS } from "@/constants";
-import { SURFACE_CSS } from "@/chat-styles";
 import { DownloadIcon, FileIcon } from "@/components/icons";
 
 type RenderKind = "image" | "video" | "audio" | "file";
@@ -212,7 +211,6 @@ export function AttachmentChip({
         downloadState === "error" && "border-destructive/40 text-destructive",
       )}
     >
-      <style href="ocs-style-surface" precedence="default">{SURFACE_CSS}</style>
       <span
         aria-hidden
         data-aui-ocs-surface="mid"

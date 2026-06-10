@@ -137,6 +137,14 @@ function freezeTail(events: EventEnvelope[]): EventEnvelope[] {
     const p = ev.payload as { content?: string } | null;
     const content = typeof p?.content === "string" && p.content.endsWith(CURSOR)
       ? p.content.slice(0, -1) : p?.content;
-    return { ...ev, payload: { ...(p ?? {}), content, finalize: true } };
+    return {
+      ...ev,
+      payload: {
+        ...(p ?? {}),
+        content,
+        finalize: true,
+        lifecycle: { phase: "final", reason: "complete" },
+      },
+    };
   });
 }

@@ -8,6 +8,7 @@
     "path": "/chat-session",
     "position": "after:chat"
   },
-  "entry": "dist/index.js?v=c65bd4f82c75",
+  "entry": "dist/index.js?v=c4e918e8efc1",
+  "css": "dist/style.css?v=80860fddc8ed",
   "api": "plugin_api.py"
 }

@@ -5,8 +5,10 @@ import type { ApprovalDecision } from "@/types";
 export const panelTitle =
   "font-mondwest text-sm uppercase tracking-[0.12em] text-midground/70";
 
+// Focus styling is central in styles.css (:focus-visible outline + input
+// :focus border) — no per-class focus rings here.
 export const controlBase =
-  "inline-flex h-9 items-center justify-center border text-xs transition focus:outline-none focus:ring-1 focus:ring-foreground/30 disabled:opacity-40";
+  "inline-flex h-9 items-center justify-center border text-xs transition focus:outline-none disabled:opacity-40";
 
 export const iconButton =
   `${controlBase} w-9 border-midground/30 text-midground/70 hover:bg-foreground/2 hover:text-foreground`;
@@ -15,7 +17,7 @@ export const actionButton =
   `${controlBase} px-3 font-medium`;
 
 export const fieldBase =
-  "h-9 min-w-0 border border-midground/30 bg-transparent px-2 text-sm leading-5 text-foreground placeholder:text-midground/50 focus:border-foreground/60 focus:outline-none focus:ring-1 focus:ring-foreground/20";
+  "h-9 min-w-0 border border-midground/30 bg-transparent px-2 text-sm leading-5 text-foreground placeholder:text-midground/50 focus:outline-none";
 
 // Small square action button used for hover-revealed controls — message
 // bubble copy/reply and session-row archive. Kept here so the surfaces
@@ -72,16 +74,9 @@ export const PUSH_TONE: Partial<Record<PushStatus, string>> = {
   working: "border-midground/30 text-midground/70 opacity-70",
 };
 
-export const DECISION_TONE: Record<ApprovalDecision, string> = {
-  once: "border-success/50 text-success hover:bg-success/10",
-  session: "border-success/40 text-success hover:bg-success/10",
-  always: "border-success/30 text-success hover:bg-success/10",
-  deny: "border-destructive/50 text-destructive hover:bg-destructive/10",
-};
-
-export const DECISION_LABEL: Record<ApprovalDecision, string> = {
-  once: "Allow once",
-  session: "Allow this session",
-  always: "Always allow",
-  deny: "Deny",
+export const DECISION: Record<ApprovalDecision, { label: string; tone: string }> = {
+  once: { label: "Allow once", tone: "border-success/50 text-success hover:bg-success/10" },
+  session: { label: "Allow this session", tone: "border-success/40 text-success hover:bg-success/10" },
+  always: { label: "Always allow", tone: "border-success/30 text-success hover:bg-success/10" },
+  deny: { label: "Deny", tone: "border-destructive/50 text-destructive hover:bg-destructive/10" },
 };

@@ -1,58 +1,9 @@
-// Keep assistant-ui mutations layout-neutral; message grouping in JS can jump on partial renders.
-export const BUBBLE_AND_SPACING_CSS = `
-[data-aui-role] + [data-aui-role] { margin-top: 2.5rem !important; }
-[data-aui-role="user"] + [data-aui-role="user"],
-[data-aui-role="assistant"] + [data-aui-role="assistant"] { margin-top: 0.125rem !important; }
-.ocs-scroll-bottom:disabled { display: none; }
+/* Static plugin styles, emitted as dist/style.css and loaded via the plugin
+ * manifest's `css` field. Scoped under [data-aui-ocs-*] attributes; tokens
+ * map host theme variables to --ocs-* custom properties. Genuinely dynamic
+ * rules stay inline in components via <style precedence>. */
 
-[data-aui-ocs-bubble] {
-  --ocs-block-gap: 0.5rem;
-  padding: 0.75rem;
-  border: 0;
-  border-radius: 0;
-  box-sizing: border-box;
-  line-height: 1.5;
-  transition: background 120ms ease;
-}
-[data-aui-ocs-attachments],
-[data-aui-ocs-attachment] {
-  max-width: 100%;
-  box-sizing: border-box;
-}
-[data-aui-role="user"] [data-aui-ocs-bubble] {
-  background: color-mix(in srgb, var(--ocs-white) 12%, transparent);
-}
-[data-aui-role="assistant"] [data-aui-ocs-bubble] {
-  background: color-mix(in srgb, var(--ocs-white) 6%, transparent);
-}
-[data-aui-role="user"]:hover [data-aui-ocs-bubble] {
-  background: color-mix(in srgb, var(--ocs-white) 16%, transparent);
-}
-[data-aui-role="assistant"]:hover [data-aui-ocs-bubble] {
-  background: color-mix(in srgb, var(--ocs-white) 9%, transparent);
-}
-[data-aui-ocs-bubble][data-aui-ocs-replyable] {
-  min-height: 2.125rem;
-}
-[data-aui-ocs-reply-button] {
-  background: var(--ocs-panel) !important;
-  color: color-mix(in srgb, var(--ocs-white) 72%, transparent);
-  box-shadow: 0 0 0 1px color-mix(in srgb, var(--ocs-panel) 82%, transparent);
-}
-[data-aui-ocs-reply-button]:hover {
-  background: color-mix(in srgb, var(--ocs-white) 8%, var(--ocs-panel)) !important;
-  color: var(--ocs-white);
-}
-
-[data-aui-role] audio {
-  filter: invert(0.86) hue-rotate(180deg);
-  border-radius: 0;
-  width: 100%;
-  height: var(--ocs-control-h, 36px);
-}
-`;
-
-export const PLUGIN_CURSOR_CSS = `
+/* --- Theme tokens, cursors, focus, controls --- */
 [data-aui-ocs-plugin] {
   --ocs-bg: var(--background);
   --ocs-panel: var(--background);
@@ -212,10 +163,8 @@ export const PLUGIN_CURSOR_CSS = `
   scroll-margin: 0.5rem;
   touch-action: manipulation;
 }
-`;
 
-// Plain CSS keeps the plugin independent from the host's Tailwind build.
-export const OCS_LAYOUT_CSS = `
+/* --- Layout (plain CSS keeps the plugin independent from the host Tailwind build) --- */
 [data-aui-ocs-plugin] {
   --ocs-control-h: 36px;
   min-width: 0;
@@ -338,15 +287,60 @@ main:has([data-aui-ocs-plugin]) > div {
   [data-aui-ocs-backdrop] { display: none; }
   [data-aui-ocs-mobile-only] { display: none; }
 }
-`;
 
-export const SLASH_ITEM_CSS = `
-[data-aui-ocs-slash-item]:hover { background: color-mix(in srgb, var(--ocs-white) 6%, transparent); }
-[data-aui-ocs-slash-item][data-highlighted] { background: color-mix(in srgb, var(--ocs-white) 12%, transparent); }
-`;
+/* --- Message bubbles + spacing (layout-neutral for assistant-ui partial renders) --- */
+[data-aui-role] + [data-aui-role] { margin-top: 2.5rem !important; }
+[data-aui-role="user"] + [data-aui-role="user"],
+[data-aui-role="assistant"] + [data-aui-role="assistant"] { margin-top: 0.125rem !important; }
+.ocs-scroll-bottom:disabled { display: none; }
 
-// Streamdown/Shiki should inherit the bubble colors.
-export const MARKDOWN_COLOR_CSS = `
+[data-aui-ocs-bubble] {
+  --ocs-block-gap: 0.5rem;
+  padding: 0.75rem;
+  border: 0;
+  border-radius: 0;
+  box-sizing: border-box;
+  line-height: 1.5;
+  transition: background 120ms ease;
+}
+[data-aui-ocs-attachments],
+[data-aui-ocs-attachment] {
+  max-width: 100%;
+  box-sizing: border-box;
+}
+[data-aui-role="user"] [data-aui-ocs-bubble] {
+  background: color-mix(in srgb, var(--ocs-white) 12%, transparent);
+}
+[data-aui-role="assistant"] [data-aui-ocs-bubble] {
+  background: color-mix(in srgb, var(--ocs-white) 6%, transparent);
+}
+[data-aui-role="user"]:hover [data-aui-ocs-bubble] {
+  background: color-mix(in srgb, var(--ocs-white) 16%, transparent);
+}
+[data-aui-role="assistant"]:hover [data-aui-ocs-bubble] {
+  background: color-mix(in srgb, var(--ocs-white) 9%, transparent);
+}
+[data-aui-ocs-bubble][data-aui-ocs-replyable] {
+  min-height: 2.125rem;
+}
+[data-aui-ocs-reply-button] {
+  background: var(--ocs-panel) !important;
+  color: color-mix(in srgb, var(--ocs-white) 72%, transparent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--ocs-panel) 82%, transparent);
+}
+[data-aui-ocs-reply-button]:hover {
+  background: color-mix(in srgb, var(--ocs-white) 8%, var(--ocs-panel)) !important;
+  color: var(--ocs-white);
+}
+
+[data-aui-role] audio {
+  filter: invert(0.86) hue-rotate(180deg);
+  border-radius: 0;
+  width: 100%;
+  height: var(--ocs-control-h, 36px);
+}
+
+/* --- Streamdown/Shiki inherit bubble colors --- */
 .ocs-markdown,
 .ocs-markdown :where(p, li, h1, h2, h3, h4, h5, h6, td, th, strong, em, code, pre, span, a) {
   color: inherit;
@@ -393,9 +387,8 @@ export const MARKDOWN_COLOR_CSS = `
   color: inherit !important;
   overflow-wrap: anywhere;
 }
-`;
 
-export const COMPOSER_CSS = `
+/* --- Composer --- */
 [data-aui-ocs-composer] {
   border-top: 1px solid color-mix(in srgb, var(--ocs-mid) 20%, transparent);
   background: transparent;
@@ -411,9 +404,12 @@ export const COMPOSER_CSS = `
 [data-aui-ocs-composer][data-dragging] {
   background: color-mix(in srgb, var(--ocs-white) 4%, transparent);
 }
-`;
 
-export const BANNER_CSS = `
+/* --- Slash-command items --- */
+[data-aui-ocs-slash-item]:hover { background: color-mix(in srgb, var(--ocs-white) 6%, transparent); }
+[data-aui-ocs-slash-item][data-highlighted] { background: color-mix(in srgb, var(--ocs-white) 12%, transparent); }
+
+/* --- Status banners --- */
 [data-aui-ocs-banner-tone="destructive"] {
   background: color-mix(in srgb, var(--ocs-danger) 10%, transparent);
 }
@@ -423,13 +419,61 @@ export const BANNER_CSS = `
 [data-aui-ocs-banner-tone="midground"] {
   background: color-mix(in srgb, var(--ocs-white) 4%, transparent);
 }
-`;
 
-export const SURFACE_CSS = `
+/* --- Surfaces --- */
 [data-aui-ocs-surface="dim"] {
   background: color-mix(in srgb, var(--ocs-white) 2%, transparent);
 }
 [data-aui-ocs-surface="mid"] {
   background: color-mix(in srgb, var(--ocs-white) 4%, transparent);
 }
-`;
+
+/* --- Session row hover-reveal actions (host Tailwind lacks group-hover for plugin source) --- */
+[data-aui-ocs-session-row] [data-aui-ocs-session-action] {
+  opacity: 0;
+  transition: opacity 0.1s ease-in-out;
+}
+[data-aui-ocs-session-row]:hover [data-aui-ocs-session-action],
+[data-aui-ocs-session-row]:focus-within [data-aui-ocs-session-action] {
+  opacity: 1;
+}
+
+/* --- Host-gap utilities ---
+ * Tailwind classes used in plugin source that the host build does not emit
+ * (it only scans its own source + @nous-research/ui). Implemented here so
+ * they actually apply; scripts/check-host-classes.mjs counts this file as a
+ * class source and fails the build on any new gap. Spacing mirrors the
+ * host's --theme-spacing-mul scaling; colors mirror its color-mix pattern. */
+[data-aui-ocs-plugin] .h-10 { height: calc(.25rem * var(--theme-spacing-mul, 1) * 10); }
+[data-aui-ocs-plugin] .h-28 { height: calc(.25rem * var(--theme-spacing-mul, 1) * 28); }
+[data-aui-ocs-plugin] .max-h-32 { max-height: calc(.25rem * var(--theme-spacing-mul, 1) * 32); }
+[data-aui-ocs-plugin] .max-h-40 { max-height: calc(.25rem * var(--theme-spacing-mul, 1) * 40); }
+[data-aui-ocs-plugin] .min-w-6 { min-width: calc(.25rem * var(--theme-spacing-mul, 1) * 6); }
+[data-aui-ocs-plugin] .my-1 { margin-block: calc(.25rem * var(--theme-spacing-mul, 1)); }
+[data-aui-ocs-plugin] .my-2 { margin-block: calc(.25rem * var(--theme-spacing-mul, 1) * 2); }
+[data-aui-ocs-plugin] .mx-2 { margin-inline: calc(.25rem * var(--theme-spacing-mul, 1) * 2); }
+[data-aui-ocs-plugin] .ml-2 { margin-left: calc(.25rem * var(--theme-spacing-mul, 1) * 2); }
+[data-aui-ocs-plugin] .pr-14 { padding-right: calc(.25rem * var(--theme-spacing-mul, 1) * 14); }
+[data-aui-ocs-plugin] .first\:mt-0:first-child { margin-top: 0; }
+[data-aui-ocs-plugin] .max-w-\[14rem\] { max-width: 14rem; }
+[data-aui-ocs-plugin] .max-w-\[18rem\] { max-width: 18rem; }
+[data-aui-ocs-plugin] .max-w-\[22rem\] { max-width: 22rem; }
+[data-aui-ocs-plugin] .max-w-\[80\%\] { max-width: 80%; }
+[data-aui-ocs-plugin] .z-20 { z-index: 20; }
+[data-aui-ocs-plugin] .object-contain { object-fit: contain; }
+[data-aui-ocs-plugin] .resize-none { resize: none; }
+[data-aui-ocs-plugin] .border-separate { border-collapse: separate; }
+[data-aui-ocs-plugin] .border-spacing-0 { border-spacing: 0; }
+[data-aui-ocs-plugin] .cursor-not-allowed { cursor: not-allowed; }
+[data-aui-ocs-plugin] .text-\[0\.9em\] { font-size: .9em; }
+[data-aui-ocs-plugin] .text-midground\/90 { color: color-mix(in oklab, var(--midground) 90%, transparent); }
+[data-aui-ocs-plugin] .border-midground\/25 { border-color: color-mix(in oklab, var(--midground) 25%, transparent); }
+[data-aui-ocs-plugin] .border-midground\/35 { border-color: color-mix(in oklab, var(--midground) 35%, transparent); }
+[data-aui-ocs-plugin] .border-midground\/40 { border-color: color-mix(in oklab, var(--midground) 40%, transparent); }
+[data-aui-ocs-plugin] .hover\:border-midground\/45:hover { border-color: color-mix(in oklab, var(--midground) 45%, transparent); }
+[data-aui-ocs-plugin] .hover\:border-midground\/50:hover { border-color: color-mix(in oklab, var(--midground) 50%, transparent); }
+[data-aui-ocs-plugin] .bg-foreground\/5 { background-color: color-mix(in oklab, var(--ocs-white) 5%, transparent); }
+[data-aui-ocs-plugin] .hover\:bg-foreground\/5:hover { background-color: color-mix(in oklab, var(--ocs-white) 5%, transparent); }
+[data-aui-ocs-plugin] .border-success\/40 { border-color: color-mix(in oklab, var(--ocs-success) 40%, transparent); }
+[data-aui-ocs-plugin] .border-success\/50 { border-color: color-mix(in oklab, var(--ocs-success) 50%, transparent); }
+[data-aui-ocs-plugin] .hover\:bg-success\/10:hover { background-color: color-mix(in oklab, var(--ocs-success) 10%, transparent); }

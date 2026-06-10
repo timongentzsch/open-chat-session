@@ -11,23 +11,7 @@ import {
   panelTitle,
 } from "@/ui";
 import { RELATIVE_TIME_BUCKETS } from "@/constants";
-import { SURFACE_CSS } from "@/chat-styles";
 import { EditIcon, RemoveIcon } from "@/components/icons";
-
-// Scoped hover-reveal for the per-row action buttons. Host Tailwind doesn't
-// reliably emit `group`/`group-hover:*` utilities for plugin source, so we
-// inline a plain CSS rule. Keyboard-focus also reveals them so they remain
-// discoverable without a pointer.
-const SESSION_ROW_CSS = `
-[data-aui-ocs-session-row] [data-aui-ocs-session-action] {
-  opacity: 0;
-  transition: opacity 0.1s ease-in-out;
-}
-[data-aui-ocs-session-row]:hover [data-aui-ocs-session-action],
-[data-aui-ocs-session-row]:focus-within [data-aui-ocs-session-action] {
-  opacity: 1;
-}
-`;
 
 // Host SDK's `timeAgo` returns "just now" for every timestamp regardless of
 // age (verified empirically). Local fallback until that's fixed upstream.
@@ -85,8 +69,6 @@ export function SessionSidebar({
       aria-label="Sessions"
       className="flex h-full w-64 shrink-0 flex-col gap-2 border-r border-midground/20 p-3"
     >
-      <style href="ocs-style-surface" precedence="default">{SURFACE_CSS}</style>
-      <style href="ocs-style-session-row" precedence="default">{SESSION_ROW_CSS}</style>
       <div className="flex h-9 items-center justify-between">
         <h2 className={panelTitle}>Sessions</h2>
         <div className="flex items-center gap-1">

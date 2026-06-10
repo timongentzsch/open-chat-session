@@ -3,7 +3,6 @@ import { React, cn } from "@/sdk";
 void React;
 import type { ConnState } from "@/runtime/external-runtime";
 import { controlBase, PILL_TONES, BANNER_TEXT_TONES, BANNER_BORDER, type BannerTone } from "@/ui";
-import { BANNER_CSS } from "@/chat-styles";
 
 function pillText(conn: ConnState, _platform?: string, healthError?: string | null): string {
   switch (conn.kind) {
@@ -60,7 +59,6 @@ export function Banner({
 }) {
   return (
     <>
-      <style href="ocs-style-banner" precedence="default">{BANNER_CSS}</style>
       <div
         data-aui-ocs-banner-tone={tone}
         className={cn(

@@ -2,15 +2,22 @@ import { createHash } from "node:crypto";
 import { readFile, writeFile } from "node:fs/promises";
 
 const manifestPath = new URL("../manifest.json", import.meta.url);
-const bundlePath = new URL("../dist/index.js", import.meta.url);
 
-const bundle = await readFile(bundlePath);
-const hash = createHash("sha256").update(bundle).digest("hex").slice(0, 12);
+async function stamped(rel) {
+  const bytes = await readFile(new URL(`../${rel}`, import.meta.url));
+  const hash = createHash("sha256").update(bytes).digest("hex").slice(0, 12);
+  return `${rel}?v=${hash}`;
+}
+
 const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
-const entry = `dist/index.js?v=${hash}`;
+const next = {
+  entry: await stamped("dist/index.js"),
+  css: await stamped("dist/style.css"),
+};
 
-if (manifest.entry !== entry) {
-  manifest.entry = entry;
+if (manifest.entry !== next.entry || manifest.css !== next.css) {
+  manifest.entry = next.entry;
+  manifest.css = next.css;
   await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
-  console.log(`dashboard manifest entry -> ${entry}`);
+  console.log(`dashboard manifest -> ${next.entry} | ${next.css}`);
 }

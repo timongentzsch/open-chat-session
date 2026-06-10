@@ -5,7 +5,6 @@ import {
 } from "@assistant-ui/react-streamdown";
 import type { ExtraProps } from "streamdown";
 import type { ComponentPropsWithoutRef } from "react";
-import { MARKDOWN_COLOR_CSS } from "@/chat-styles";
 
 // Render every "\n" inside markdown text as a hard <br>. Without this,
 // single newlines collapse to a space (CommonMark default) and the agent's
@@ -110,7 +109,6 @@ const components = {
 export const MarkdownText = React.memo(function MarkdownText() {
   return (
     <>
-      <style href="ocs-style-markdown-color" precedence="default">{MARKDOWN_COLOR_CSS}</style>
       <StreamdownTextPrimitive
         className={cn("ocs-markdown min-w-0 break-words text-foreground")}
         components={components}

@@ -10,18 +10,12 @@ import {
   type MessageState,
 } from "@assistant-ui/react";
 import type { ApprovalDecision, AttachmentRef } from "@/types";
+import { ApprovalBubble, ClarifyBubble } from "@/components/ApprovalPanel";
 import { AttachmentChip } from "@/components/AttachmentChip";
 import { MarkdownText } from "@/components/MarkdownText";
-import { BUBBLE_AND_SPACING_CSS } from "@/chat-styles";
 import type { ApprovalView, ClarifyView, OurMessage } from "@/runtime/session-store";
 import { DownIcon, ReplyIcon, CopyIcon, CheckIcon } from "@/components/icons";
-import {
-  actionButton,
-  bubbleActionClass,
-  bubbleActionStyle,
-  DECISION_LABEL,
-  DECISION_TONE,
-} from "@/ui";
+import { bubbleActionClass, bubbleActionStyle } from "@/ui";
 
 const DEFAULT_EMPTY_HINT = "No messages yet. Send something below.";
 const TYPING_DOT_DELAYS_MS = [0, 120, 240];
@@ -153,12 +147,14 @@ export function ChatThread({
     };
   }, []);
 
-  // Scroll anchoring for "load more": pin the first visible message to its screen
-  // position across the prepend. We capture that message + its top before the
-  // fetch, then correct scrollTop by the top delta in a layout effect (pre-paint,
-  // so there's no visible jump) and again as async markdown/Shiki settle the
-  // newly-prepended heights above. Correcting by element delta (not by
-  // distance-from-bottom in a post-paint MutationObserver) removes the jitter.
+  // Prepend stability: pin the first visible message to its screen position
+  // across the prepend by id + rect (native CSS scroll anchoring tracks DOM
+  // nodes and assistant-ui recreates them on prepend, so it never engages).
+  // The pin is corrected pre-paint in a layout effect and re-corrected on
+  // every later reflow — async markdown/Shiki/media settling included — and
+  // released only on real user scroll intent. A timed release here caused
+  // the old "snap back": highlights settling after the timer shifted the
+  // viewport with nothing left to re-pin it.
   const pendingAnchorRef = useRef<{ id: string; top: number } | null>(null);
   const beforePrepend = useCallback(() => {
     const vp = viewportRef.current;
@@ -187,20 +183,26 @@ export function ChatThread({
     };
     correct(); // synchronous, before paint
     if (loadingOlder) return; // more pages still coming — keep the anchor
-    // Loading finished: re-pin as async markdown/media settle, then release.
+    // Re-pin on every reflow (sizes settling, late nodes) until the user
+    // actually scrolls; pointerdown covers touch and scrollbar drags.
     const ro = new ResizeObserver(correct);
-    vp.querySelectorAll<HTMLElement>("[data-aui-ocs-message-id]").forEach((el) => ro.observe(el));
+    const observeAll = () =>
+      vp.querySelectorAll<HTMLElement>("[data-aui-ocs-message-id]").forEach((el) => ro.observe(el));
+    observeAll();
+    const mo = new MutationObserver(observeAll);
+    mo.observe(vp, { childList: true, subtree: true });
     const release = () => {
       ro.disconnect();
-      clearTimeout(cap);
+      mo.disconnect();
       vp.removeEventListener("wheel", release);
-      vp.removeEventListener("touchstart", release);
+      vp.removeEventListener("pointerdown", release);
+      vp.removeEventListener("keydown", release);
       pendingAnchorRef.current = null;
     };
-    const cap = window.setTimeout(release, 1000);
     vp.addEventListener("wheel", release, { passive: true });
-    vp.addEventListener("touchstart", release, { passive: true });
-    return () => { ro.disconnect(); clearTimeout(cap); };
+    vp.addEventListener("pointerdown", release, { passive: true });
+    vp.addEventListener("keydown", release);
+    return release;
   }, [messages.length, loadingOlder]);
 
   // Explicit paging: a "load older" button is more predictable than a
@@ -213,14 +215,13 @@ export function ChatThread({
 
   return (
     <ThreadPrimitive.Root className="relative flex min-h-0 flex-1 flex-col">
-      <style href="ocs-style-bubble-spacing" precedence="default">{BUBBLE_AND_SPACING_CSS}</style>
       <ThreadPrimitive.Viewport
         ref={viewportRef}
         autoScroll
         scrollToBottomOnRunStart={false}
         data-aui-ocs-thread-viewport
-        // overflowAnchor:none so the browser doesn't fight beforePrepend's manual
-        // scroll anchoring during a prepend (no Tailwind utility for this).
+        // Disable native scroll anchoring so it can't fight the manual pin
+        // on engines where it partially engages (no Tailwind utility for this).
         style={{ overflowAnchor: "none" }}
         className="flex min-h-0 flex-1 flex-col overflow-y-auto px-4 py-4"
       >
@@ -289,141 +290,6 @@ interface BubbleProps {
   role: "user" | "assistant";
   onReply?: (messageId: string) => void;
   showTime?: boolean;
-}
-
-function ApprovalBubble({
-  approval,
-  onDecide,
-}: {
-  approval: ApprovalView;
-  onDecide: (toolCallId: string, decision: ApprovalDecision) => Promise<void>;
-}) {
-  const [busy, setBusy] = useState<ApprovalDecision | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  const decide = async (d: ApprovalDecision) => {
-    setBusy(d);
-    setError(null);
-    try {
-      await onDecide(approval.tool_call_id, d);
-    } catch (exc) {
-      const msg = exc instanceof Error ? exc.message : String(exc);
-      setError(msg.includes("already_resolved") ? "Already resolved" : msg);
-      setBusy(null);
-    }
-  };
-
-  return (
-    <PendingActionBubble title={`approve · ${approval.tool_name || "tool"}`}>
-      {approval.prompt && (
-        <p className="whitespace-pre-wrap break-words">{approval.prompt}</p>
-      )}
-      {approval.command && (
-        <pre className="max-h-32 overflow-y-auto border border-midground/20 p-1.5 text-[11px] text-midground/80 whitespace-pre-wrap break-all">
-          {approval.command}
-        </pre>
-      )}
-      {error && (
-        <div className="border border-destructive/40 px-2 py-1 text-[11px] text-destructive">
-          {error}
-        </div>
-      )}
-      <div className="grid grid-cols-2 gap-1">
-        {approval.choices.map((d) => (
-          <button
-            key={d}
-            type="button"
-            disabled={!!busy}
-            onClick={() => decide(d)}
-            className={cn(
-              actionButton,
-              "h-8 px-2 text-[11px]",
-              DECISION_TONE[d],
-              busy === d && "opacity-60",
-              busy && busy !== d && "opacity-40",
-            )}
-          >
-            {DECISION_LABEL[d] ?? d}
-          </button>
-        ))}
-      </div>
-    </PendingActionBubble>
-  );
-}
-
-function ClarifyBubble({
-  clarify,
-  onRespond,
-}: {
-  clarify: ClarifyView;
-  onRespond: (choice: string) => Promise<void>;
-}) {
-  const [busy, setBusy] = useState<string | null>(null);
-
-  const pick = async (choice: string) => {
-    setBusy(choice);
-    try {
-      await onRespond(choice);
-    } catch {
-      setBusy(null);
-    }
-  };
-
-  return (
-    <PendingActionBubble title="clarify">
-      {clarify.question && (
-        <p className="whitespace-pre-wrap break-words">{clarify.question}</p>
-      )}
-      {clarify.choices.length > 0 && (
-        <div className="flex flex-col gap-1">
-          {clarify.choices.map((choice) => (
-            <button
-              key={choice}
-              type="button"
-              disabled={!!busy}
-              onClick={() => pick(choice)}
-              className={cn(
-                actionButton,
-                "h-8 justify-start px-2 text-[11px] border-midground/40 hover:bg-foreground/5",
-                busy === choice && "opacity-60",
-                busy && busy !== choice && "opacity-40",
-              )}
-            >
-              {choice}
-            </button>
-          ))}
-        </div>
-      )}
-      <span className="text-[10px] text-midground/60">
-        {clarify.choices.length > 0
-          ? "or type your own answer in the composer below"
-          : "type your answer in the composer below"}
-      </span>
-    </PendingActionBubble>
-  );
-}
-
-function PendingActionBubble({
-  title,
-  children,
-}: {
-  title: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <div
-      data-aui-role="assistant"
-      data-aui-ocs-card="pending"
-      className="flex flex-col items-start"
-    >
-      <div className="flex w-full max-w-[80%] flex-col gap-1.5 border border-warning/40 p-2 text-xs text-foreground">
-        <span className="font-mondwest text-[10px] uppercase tracking-[0.1em] text-warning">
-          {title}
-        </span>
-        {children}
-      </div>
-    </div>
-  );
 }
 
 function Bubble({ sessionId, attachments, role, onReply, showTime = true }: BubbleProps) {

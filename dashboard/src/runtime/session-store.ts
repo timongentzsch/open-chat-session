@@ -12,6 +12,7 @@ import type {
   GatewayEvent,
   MessageEditPayload,
   MessageCancelPayload,
+  MessageLifecycle,
   MessageOutPayload,
   StreamId,
   TypingPayload,
@@ -122,6 +123,14 @@ const TRANSCRIPT_KINDS = new Set<string>([
 function isMidStream(content: string | undefined, ts: number): boolean {
   if (!content || !content.endsWith(STREAM_CURSOR_CHAR)) return false;
   return Date.now() - ts < STALE_MS;
+}
+
+// Explicit lifecycle wins; null = row predates lifecycle, use glyph fallback.
+// A stale "streaming" row renders settled, mirroring the glyph freshness gate.
+function lifecycleFinalized(lc: MessageLifecycle | undefined, ts: number): boolean | null {
+  if (!lc) return null;
+  if (lc.phase === "final") return true;
+  return Date.now() - ts >= STALE_MS;
 }
 
 export class SessionStore {
@@ -270,7 +279,7 @@ export class SessionStore {
       }
       case "gateway.message.out": {
         const p = env.payload as MessageOutPayload;
-        const finalized = !isMidStream(p.content ?? "", env.ts);
+        const finalized = lifecycleFinalized(p.lifecycle, env.ts) ?? !isMidStream(p.content ?? "", env.ts);
         this.msgEvents.set(env.seq, env);
         this.set({
           currentStreamId: finalized ? null : (env.stream_id ?? this.state.currentStreamId),
@@ -281,8 +290,9 @@ export class SessionStore {
       }
       case "gateway.message.edit": {
         const p = env.payload as MessageEditPayload;
-        const finalized = p.finalize === true
-          || (p.finalize !== false && !isMidStream(p.content ?? "", env.ts));
+        const finalized = lifecycleFinalized(p.lifecycle, env.ts)
+          ?? (p.finalize === true
+            || (p.finalize !== false && !isMidStream(p.content ?? "", env.ts)));
         this.msgEvents.set(env.seq, env);
         this.set({
           currentStreamId: finalized ? null : (env.stream_id ?? this.state.currentStreamId),
@@ -552,7 +562,8 @@ function foldTranscript(events: EventEnvelope[]): {
       case "gateway.message.out": {
         const id = p.message_id as string;
         const content = (p.content as string) ?? "";
-        const finalized = !isMidStream(content, env.ts);
+        const finalized = lifecycleFinalized(p.lifecycle as MessageLifecycle | undefined, env.ts)
+          ?? !isMidStream(content, env.ts);
         if (!segOf.has(id)) { segOf.set(id, id); segBase.set(id, 0); }
         lastEdit.set(id, env.seq);
         lastFull.set(id, content);
@@ -562,7 +573,8 @@ function foldTranscript(events: EventEnvelope[]): {
       case "gateway.message.edit": {
         const id = p.message_id as string;
         const content = (p.content as string) ?? "";
-        const finalized = p.finalize === true || (p.finalize !== false && !isMidStream(content, env.ts));
+        const finalized = lifecycleFinalized(p.lifecycle as MessageLifecycle | undefined, env.ts)
+          ?? (p.finalize === true || (p.finalize !== false && !isMidStream(content, env.ts)));
         const known = segOf.has(id);
         const changed = content !== lastFull.get(id);
         if (!known) { segOf.set(id, id); segBase.set(id, 0); }

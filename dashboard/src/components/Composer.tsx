@@ -12,7 +12,6 @@ import {
 } from "@assistant-ui/react";
 import type { Unstable_TriggerItem } from "@assistant-ui/core";
 import { controlBase, fieldBase, iconButton, smallIconControl } from "@/ui";
-import { SLASH_ITEM_CSS, COMPOSER_CSS, SURFACE_CSS } from "@/chat-styles";
 import type { OurMessage } from "@/runtime/session-store";
 import type { GatewayClient } from "@/gateway-client";
 import { useAtCompletions } from "@/hooks/useAtCompletions";
@@ -260,7 +259,6 @@ function SlashCommands() {
       className="absolute z-20 flex flex-col overflow-hidden border border-midground/30 bg-background p-1 shadow-xl"
       data-aui-ocs-slash-popover
     >
-      <style href="ocs-style-slash-item" precedence="default">{SLASH_ITEM_CSS}</style>
       <ComposerPrimitive.Unstable_TriggerPopover.Action {...slash.action} />
       <ComposerPrimitive.Unstable_TriggerPopoverItems>
         {(items) => (
@@ -321,7 +319,6 @@ function AtCompletions({ client, sessionId }: { client: GatewayClient; sessionId
       className="absolute z-20 flex flex-col overflow-hidden border border-midground/30 bg-background p-1 shadow-xl"
       data-aui-ocs-slash-popover
     >
-      <style href="ocs-style-slash-item" precedence="default">{SLASH_ITEM_CSS}</style>
       <ComposerPrimitive.Unstable_TriggerPopover.Directive formatter={formatter} />
       <ComposerPrimitive.Unstable_TriggerPopoverItems>
         {(items) => (
@@ -357,8 +354,6 @@ export function Composer({
     <ComposerPrimitive.AttachmentDropzone
       data-aui-ocs-composer
     >
-      <style href="ocs-style-composer" precedence="default">{COMPOSER_CSS}</style>
-      <style href="ocs-style-surface" precedence="default">{SURFACE_CSS}</style>
       <ComposerPrimitive.Unstable_TriggerPopoverRoot>
         <ComposerPrimitive.Root className="relative flex flex-col gap-1.5 px-3 py-2">
           {replyTarget && (

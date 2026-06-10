@@ -87,17 +87,26 @@ export interface MessageInPayload {
   metadata?: JsonObject;
 }
 
+// Absent on rows persisted before the adapter stamped lifecycle; clients then
+// fall back to cursor-glyph/finalize inference.
+export interface MessageLifecycle {
+  phase: "streaming" | "final";
+  reason?: "complete" | "cancel" | "error";
+}
+
 export interface MessageOutPayload {
   message_id: MessageId;
   content: string;
   reply_to?: MessageId;
   metadata?: JsonObject;
+  lifecycle?: MessageLifecycle;
 }
 
 export interface MessageEditPayload {
   message_id: MessageId;
   content: string;
   finalize: boolean;
+  lifecycle?: MessageLifecycle;
 }
 
 export interface MessageCancelPayload {

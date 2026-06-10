@@ -2,6 +2,8 @@
 // we register ChatPage so PluginPage can mount it.
 
 import "@/sdk";
+// Emitted as dist/style.css; loaded by the host via manifest "css".
+import "@/styles.css";
 import { ChatPage } from "@/pages/ChatPage";
 import { injectPwaTags } from "@/push/inject-pwa";
 

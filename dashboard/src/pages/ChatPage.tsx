@@ -11,7 +11,6 @@ import { Composer } from "@/components/Composer";
 import { Banner, ConnectionPill } from "@/components/StatusBanners";
 import { PushPanel } from "@/components/PushPanel";
 import { MenuIcon } from "@/components/icons";
-import { PLUGIN_CURSOR_CSS, OCS_LAYOUT_CSS } from "@/chat-styles";
 import {
   AssistantRuntimeProvider,
   useSessionRuntime,
@@ -225,8 +224,6 @@ export function ChatPage() {
   // sole scroller.
   return (
     <div data-aui-ocs-plugin className={cn("absolute inset-0 flex flex-col min-h-0")}>
-      <style href="ocs-style-cursor" precedence="default">{PLUGIN_CURSOR_CSS}</style>
-      <style href="ocs-style-layout" precedence="default">{OCS_LAYOUT_CSS}</style>
       <header
         data-aui-ocs-header
         className={cn(
